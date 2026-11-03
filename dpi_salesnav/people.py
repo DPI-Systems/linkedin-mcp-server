@@ -8,8 +8,10 @@ import asyncio
 import logging
 import random
 import re
+from collections import Counter
+from dataclasses import dataclass
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from linkedin_mcp_server.core.exceptions import RateLimitError
 from linkedin_mcp_server.core.throttle import throttle_evidence, throttled_count
@@ -28,17 +30,112 @@ _PROFILE_ID = re.compile(r"urn:li:fs_salesProfile:\(([^,]+),([^,]+),([^)]+)\)")
 _SAFE_KEYWORDS = re.compile(r"[^\w\s\-.&]", re.UNICODE)
 
 
-def lead_search_url(company_id: str, keywords: str | None, page: int) -> str:
-    company = quote(f"urn:li:organization:{company_id}", safe="")
-    filters = (
-        "filters:List((type:CURRENT_COMPANY,values:List("
-        f"(id:{company},selectionType:INCLUDED))))"
-    )
-    parts = [filters]
+# Sales Navigator's own filter ids, read back from its search metadata.
+SENIORITY_IDS = {
+    "training": 100,
+    "entry": 110,
+    "senior": 120,
+    "strategic": 130,
+    "entry_manager": 200,
+    "experienced_manager": 210,
+    "director": 220,
+    "vp": 300,
+    "cxo": 310,
+    "owner": 320,
+}
+FUNCTION_IDS = {
+    "accounting": 1,
+    "administrative": 2,
+    "arts_design": 3,
+    "business_development": 4,
+    "community_social": 5,
+    "consulting": 6,
+    "education": 7,
+    "engineering": 8,
+    "entrepreneurship": 9,
+    "finance": 10,
+    "healthcare": 11,
+    "human_resources": 12,
+    "it": 13,
+    "legal": 14,
+    "marketing": 15,
+    "media_communication": 16,
+    "military_protective": 17,
+    "operations": 18,
+    "product_management": 19,
+    "program_project_management": 20,
+    "purchasing": 21,
+    "quality_assurance": 22,
+    "real_estate": 23,
+    "research": 24,
+    "sales": 25,
+    "customer_success": 26,
+}
+SPAIN_GEO_ID = "105646813"
+
+
+@dataclass(frozen=True)
+class LeadFilters:
+    keywords: str | None = None
+    titles: tuple[str, ...] = ()
+    seniority: tuple[str, ...] = ()
+    functions: tuple[str, ...] = ()
+    regions: tuple[str, ...] = ()
+    posted_recently: bool = False
+    changed_jobs_recently: bool = False
+
+    def __post_init__(self) -> None:
+        _check_names("seniority", self.seniority, SENIORITY_IDS)
+        _check_names("functions", self.functions, FUNCTION_IDS)
+        bad = [r for r in self.regions if not str(r).isdigit()]
+        if bad:
+            raise ValueError(f"regions must be numeric LinkedIn geo ids, got {bad}")
+
+
+def _check_names(field: str, names: tuple[str, ...], table: dict[str, int]) -> None:
+    unknown = [n for n in names if n not in table]
+    if unknown:
+        raise ValueError(f"Unknown {field} {unknown}; use any of: {', '.join(table)}")
+
+
+def _clean_text(text: str) -> str:
+    return " ".join(_SAFE_KEYWORDS.sub(" ", text).split())
+
+
+def _filter(kind: str, values: list[str]) -> str:
+    items = ",".join(f"({v},selectionType:INCLUDED)" for v in values)
+    return f"(type:{kind},values:List({items}))"
+
+
+def lead_search_url(
+    company_id: str | None, filters: LeadFilters | None = None, page: int = 1
+) -> str:
+    f = filters or LeadFilters()
+    clauses = []
+    if company_id:
+        company = quote(f"urn:li:organization:{company_id}", safe="")
+        clauses.append(_filter("CURRENT_COMPANY", [f"id:{company}"]))
+    titles = [t for t in (_clean_text(t) for t in f.titles) if t]
+    if titles:
+        clauses.append(_filter("CURRENT_TITLE", [f"text:{t}" for t in titles]))
+    if f.seniority:
+        clauses.append(
+            _filter("SENIORITY_LEVEL", [f"id:{SENIORITY_IDS[n]}" for n in f.seniority])
+        )
+    if f.functions:
+        clauses.append(
+            _filter("FUNCTION", [f"id:{FUNCTION_IDS[n]}" for n in f.functions])
+        )
+    if f.regions:
+        clauses.append(_filter("REGION", [f"id:{r}" for r in f.regions]))
+    if f.posted_recently:
+        clauses.append(_filter("POSTED_ON_LINKEDIN", ["id:RPOL"]))
+    if f.changed_jobs_recently:
+        clauses.append(_filter("RECENTLY_CHANGED_JOBS", ["id:RPC"]))
+    parts = [f"filters:List({','.join(clauses)})"] if clauses else []
+    keywords = _clean_text(f.keywords or "")
     if keywords:
-        cleaned = _SAFE_KEYWORDS.sub(" ", keywords).strip()
-        if cleaned:
-            parts.insert(0, f"keywords:{cleaned}")
+        parts.insert(0, f"keywords:{keywords}")
     query = quote("(" + ",".join(parts) + ")", safe="():,")
     suffix = f"&page={page}" if page > 1 else ""
     return f"https://www.linkedin.com/sales/search/people?query={query}{suffix}"
@@ -57,10 +154,12 @@ def _started_on(value: Any) -> str | None:
     return f"{value['year']}-{month:02d}" if month else str(value["year"])
 
 
-def lead_from_hit(hit: dict[str, Any], company_id: str) -> dict[str, Any]:
+def lead_from_hit(hit: dict[str, Any], company_id: str | None) -> dict[str, Any]:
     positions = [p for p in hit.get("currentPositions") or [] if isinstance(p, dict)]
     at_company = [
-        p for p in positions if str(p.get("companyUrn", "")).endswith(f":{company_id}")
+        p
+        for p in positions
+        if company_id and str(p.get("companyUrn", "")).endswith(f":{company_id}")
     ]
     main = (at_company or positions or [{}])[0]
     badges = {
@@ -88,6 +187,7 @@ def lead_from_hit(hit: dict[str, Any], company_id: str) -> dict[str, Any]:
         "degree": hit.get("degree"),
         "recent_activity": badges.get("POSTED_ON_LINKEDIN"),
         "changed_jobs_recently": "RECENTLY_HIRED" in badges or "CHANGED_JOBS" in badges,
+        "promoted_recently": "RECENTLY_PROMOTED" in badges,
         "badges": badges,
         "summary": hit.get("summary"),
         "open_link": hit.get("openLink"),
@@ -104,6 +204,28 @@ def lead_from_hit(hit: dict[str, Any], company_id: str) -> dict[str, Any]:
     }
 
 
+def region_breakdown(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Where the results live, by Sales Navigator region, with geo ids."""
+    out = []
+    for flt in (payload.get("metadata") or {}).get("filters") or []:
+        agg = flt.get("aggregatedFilterMetadata") if isinstance(flt, dict) else None
+        if not isinstance(agg, dict) or agg.get("type") != "GEOGRAPHY":
+            continue
+        for group in agg.get("values") or []:
+            if group.get("type") != "REGION":
+                continue
+            for v in group.get("values") or []:
+                count = str(v.get("displayCount", "")).strip()
+                out.append(
+                    {
+                        "id": v.get("id"),
+                        "name": v.get("displayValue"),
+                        "count": int(count) if count.isdigit() else count or None,
+                    }
+                )
+    return out
+
+
 def _raise_if_throttled() -> None:
     if throttled_count():
         raise RateLimitError(
@@ -111,20 +233,59 @@ def _raise_if_throttled() -> None:
         )
 
 
-async def _load_page(page: Any, url: str) -> dict[str, Any] | None:
+async def page_diagnosis(page: Any, recorder: SalesApiRecorder) -> str:
+    """What the page showed when the data never came, for the error message."""
+    try:
+        title = await page.title()
+        text = await page.evaluate("() => document.body ? document.body.innerText : ''")
+    except Exception as e:
+        title, text = "?", f"(could not read the page: {e})"
+    statuses = [
+        f"{urlparse(r['url']).path.rsplit('/', 1)[-1]}={r['status']}"
+        for r in recorder.records
+    ]
+    hosts = Counter(entry.split("/", 1)[0] for entry in recorder.seen)
+    linkedin = [
+        e
+        for e in recorder.seen
+        if e.startswith("www.linkedin.com/") and "/sales-api/" not in e
+    ]
+    head = " ".join(str(text).split())[:300]
+    return (
+        f"page {page.url!r}, title {title!r}, text {head!r}, "
+        f"sales-api responses {statuses[-15:]}, "
+        f"all responses by host {dict(hosts.most_common(8))}, "
+        f"other linkedin responses {linkedin[-15:]}"
+    )
+
+
+async def load_sales_json(page: Any, url: str, path: str, what: str) -> dict[str, Any]:
+    """Open ``url`` and return the newest ``path`` JSON its load brings.
+
+    After a few searches Sales Navigator can show results without asking the
+    network for them again; a reload makes it ask, as it would for a person
+    pressing F5. One reload at most.
+    """
     recorder = SalesApiRecorder(page)
     recorder.install()
     try:
         await page.goto(url, wait_until="domcontentloaded")
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + _RESPONSE_TIMEOUT
-        while loop.time() < deadline:
-            await recorder.drain()
-            if found := recorder.matching(LEAD_SEARCH_PATH):
-                return found[-1]["json"]
-            _raise_if_throttled()
-            await asyncio.sleep(0.5)
-        return None
+        for attempt in range(2):
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + _RESPONSE_TIMEOUT
+            while loop.time() < deadline:
+                await recorder.drain()
+                if found := recorder.matching(path):
+                    return found[-1]["json"]
+                _raise_if_throttled()
+                await asyncio.sleep(0.5)
+            if attempt == 0:
+                logger.info("No %s data after load; reloading once", what)
+                await page.reload(wait_until="domcontentloaded")
+        raise RuntimeError(
+            f"Sales Navigator {what} loaded no results data, even after a "
+            "reload: " + await page_diagnosis(page, recorder)
+        )
     finally:
         recorder.remove()
         await recorder.drain()
@@ -132,29 +293,25 @@ async def _load_page(page: Any, url: str) -> dict[str, Any] | None:
 
 async def company_people(
     page: Any,
-    company_id: str,
+    company_id: str | None,
     *,
-    keywords: str | None = None,
+    filters: LeadFilters | None = None,
     max_results: int = PAGE_SIZE,
 ) -> dict[str, Any]:
     leads: list[dict[str, Any]] = []
+    regions: list[dict[str, Any]] = []
     total: int | None = None
     pages_read = 0
     page_number = 1
     while len(leads) < max_results:
         if page_number > 1:
             await asyncio.sleep(random.uniform(*_PAGE_PAUSE))
-        url = lead_search_url(company_id, keywords, page_number)
-        payload = await _load_page(page, url)
+        url = lead_search_url(company_id, filters, page_number)
+        payload = await load_sales_json(page, url, LEAD_SEARCH_PATH, "lead search")
         _raise_if_throttled()
-        if payload is None:
-            if page_number == 1:
-                raise RuntimeError(
-                    "Sales Navigator search loaded no results data; "
-                    f"the page ended at {page.url}"
-                )
-            break
         pages_read += 1
+        if page_number == 1:
+            regions = region_breakdown(payload)
         total = (payload.get("paging") or {}).get("total", total)
         hits = payload.get("elements") or []
         leads.extend(lead_from_hit(h, company_id) for h in hits if isinstance(h, dict))
@@ -163,10 +320,11 @@ async def company_people(
         page_number += 1
     return {
         "company_id": company_id,
-        "search_url": lead_search_url(company_id, keywords, 1),
+        "search_url": lead_search_url(company_id, filters),
         "total_available": total,
         "pages_read": pages_read,
         "count": min(len(leads), max_results),
+        "region_breakdown": regions,
         "leads": leads[:max_results],
     }
 
@@ -185,48 +343,44 @@ def account_from_hit(hit: dict[str, Any]) -> dict[str, Any] | None:
     match = _SALES_COMPANY_URN.search(str(hit.get("entityUrn", "")))
     if not match:
         return None
+    company_id = match.group(1)
+    location = next(
+        (
+            hit[k]
+            for k in ("location", "headquarters", "geoRegion", "hqLocation")
+            if isinstance(hit.get(k), str) and hit[k].strip()
+        ),
+        None,
+    )
+    description = hit.get("description")
     return {
-        "company_id": match.group(1),
+        "company_id": company_id,
         "name": hit.get("companyName"),
         "industry": hit.get("industry"),
         "employees": hit.get("employeeCountRange") or hit.get("employeeDisplayCount"),
-        "location": hit.get("location") or hit.get("headquarters"),
+        "location": location,
+        "description": description[:300] if isinstance(description, str) else None,
+        "sales_nav_url": f"https://www.linkedin.com/sales/company/{company_id}",
+        "linkedin_url": f"https://www.linkedin.com/company/{company_id}/",
     }
 
 
-async def find_company(page: Any, name: str) -> dict[str, Any]:
-    """Resolve a company name with Sales Navigator's account search."""
-    recorder = SalesApiRecorder(page)
-    recorder.install()
-    try:
-        await page.goto(account_search_url(name), wait_until="domcontentloaded")
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + _RESPONSE_TIMEOUT
-        payload = None
-        while loop.time() < deadline:
-            await recorder.drain()
-            if found := recorder.matching(ACCOUNT_SEARCH_PATH):
-                payload = found[-1]["json"]
-                break
-            _raise_if_throttled()
-            await asyncio.sleep(0.5)
-    finally:
-        recorder.remove()
-        await recorder.drain()
-    if payload is None:
-        seen = sorted({r["url"].split("?")[0] for r in recorder.records})
-        raise RuntimeError(
-            f"Sales Navigator account search loaded no results data for '{name}'. "
-            f"Responses seen: {seen[-8:]}"
-        )
-    accounts = [
+async def search_companies(page: Any, name: str) -> dict[str, Any]:
+    """Every company Sales Navigator's account search returns for ``name``."""
+    payload = await load_sales_json(
+        page,
+        account_search_url(name),
+        ACCOUNT_SEARCH_PATH,
+        f"account search for '{name}'",
+    )
+    companies = [
         a
         for a in (account_from_hit(h) for h in payload.get("elements") or [])
         if a is not None
     ]
-    if not accounts:
-        raise ValueError(f"Sales Navigator found no company named '{name}'.")
-    wanted = name.casefold().strip()
-    exact = [a for a in accounts if (a["name"] or "").casefold().strip() == wanted]
-    chosen = (exact or accounts)[0]
-    return {"chosen": chosen, "exact_match": bool(exact), "candidates": accounts[:5]}
+    return {
+        "query": name,
+        "total_available": (payload.get("paging") or {}).get("total"),
+        "count": len(companies),
+        "companies": companies,
+    }

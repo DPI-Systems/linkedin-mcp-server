@@ -17,20 +17,38 @@ owner se crea con el entrypoint de upstream y no tendrá las herramientas de Sal
 | `dpi_salesnav/capture.py` | Escucha pasiva de las respuestas `/sales-api/` que la propia página pide (mismo patrón que `linkedin/conversations.py`; nunca hacemos peticiones propias a la API) |
 | `dpi_salesnav/people.py` | Empresa → personas (búsqueda de leads de Sales Nav) |
 | `dpi_salesnav/inmail.py` | Envío de InMail desde la ficha del lead |
+| `dpi_salesnav/inbox.py` | Buzón de Sales Nav: lista de hilos y mensajes de un hilo |
 | `dpi_salesnav/tools.py` | Registro MCP |
 
 ## Herramientas
 
-- **`salesnav_company_people(company, keywords?, max_results=25)`**: solo lectura. `company` acepta un slug
-  (`sorigue`), una URL o el id numérico (`1205762`). Con slug cuesta una carga de página más para obtener el id.
-  Cada página de 25 resultados es una navegación, con 4-9 s de pausa entre páginas. Por lead devuelve:
-  `full_name`, `title`, `company`, `tenure_at_company`, `tenure_at_position`, `position_started_on`,
-  `location`, `seniority`, `degree`, `recent_activity`, `badges`, `summary`, `open_link` y `sales_nav_url`.
+- **`salesnav_search_companies(name)`**: solo lectura. Devuelve todas las empresas que da el buscador de cuentas de
+  Sales Nav (hasta 25) con `company_id`, `name`, `industry`, `employees`, `location`, `description` y enlaces. No elige:
+  quien llama compara y escoge (cuidado con UTE, filiales y nombres parecidos).
+- **`salesnav_company_people(company_id, keywords?, titles?, seniority?, functions?, regions?, posted_recently?, changed_jobs_recently?, max_results=25)`**: solo lectura.
+  - `company_id`: el id numérico que devuelve `salesnav_search_companies`.
+  - Filtros: `titles` (texto libre), `seniority` (`director`, `vp`, `cxo`, `owner`, ...), `functions` (`sales`,
+    `business_development`, `operations`, ...), `regions` (ids de zona; España = `105646813`), `posted_recently`
+    (ha publicado en los últimos 30 días) y `changed_jobs_recently` (ha cambiado de empleo en los últimos 90 días).
+  - Cada página de 25 resultados es una navegación. Por lead devuelve: `full_name`, `title`, `company`,
+    `tenure_at_company`, `tenure_at_position`, `position_started_on`, `location`, `seniority`, `degree`,
+    `recent_activity`, `changed_jobs_recently`, `promoted_recently`, `badges`, `summary`, `open_link` y
+    `sales_nav_url`. Sales Nav no siempre incluye la insignia de actividad, así que `recent_activity` puede venir
+    vacío aunque la persona haya publicado.
+- **`salesnav_search_people(keywords?, titles?, seniority?, functions?, regions?, ...)`**: como la anterior pero en
+  todas las empresas. Ambas devuelven `region_breakdown` (zonas de los resultados con su id): para filtrar por una
+  ciudad sin conocer su id, se busca con la ciudad en `keywords`, se lee su id ahí y se repite con `regions`.
 - **`salesnav_send_inmail(lead_url, subject, body, confirm_send=false)`**: escritura.
   - Sin `confirm_send` es una vista previa: escribe el texto, comprueba el botón de enviar, lo borra y cierra el formulario.
-  - Con `confirm_send=true` envía y lo confirma con la respuesta POST de Sales Nav y el formulario vacío.
-  - Tope diario por cuenta en `DPI_SALESNAV_INMAIL_DAILY_CAP` (por defecto 15), con registro en `~/.dpi-salesnav/`.
+  - Con `confirm_send=true` envía. Solo devuelve `sent` si el texto aparece en la conversación abierta.
   - `status: "unconfirmed"` significa que se pulsó enviar pero no hubo confirmación: revisa el buzón antes de reintentar.
+- **`salesnav_inbox(limit=20)`**: los 20 hilos más recientes del buzón de Sales Nav, con el contacto, el último
+  mensaje, `awaiting_their_reply` (el último mensaje es nuestro) y `they_replied`. Abrir el buzón abre su hilo más reciente y lo marca como leído.
+- **`salesnav_get_thread(thread_id)`**: todos los mensajes de un hilo, del más antiguo al más reciente. Lo marca como leído.
+
+No hay topes ni horarios en el servidor: cuándo y cuánto se envía lo decide quien llama. Lo que sí hay son
+pausas aleatorias entre acciones dentro de cada herramienta (de 4 a 9 s entre páginas de resultados y de 0,5 a 2 s
+entre los pasos de escribir y enviar un mensaje), para que el ritmo sea el de una persona.
 
 Los selectores son atributos propios de Sales Nav (`data-anchor-send-inmail`,
 `data-x-conversation-widget=compose-form`, `data-sales-action`, `overlay.close_overlay`), no texto
@@ -67,4 +85,4 @@ ficheros sino las APIs internas que importamos: `get_ready_extractor`, `tool_err
 ## Datos
 
 Ni perfiles, ni cookies, ni JSON capturados van al repo: todo vive en `~/.linkedin-mcp-cuenta*/`,
-y `~/.dpi-salesnav/`, fuera del árbol del proyecto.
+fuera del árbol del proyecto.

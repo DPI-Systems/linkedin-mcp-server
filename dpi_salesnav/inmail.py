@@ -8,18 +8,12 @@ typed, read back and cleared again, so nothing leaves the browser.
 """
 
 import asyncio
-import datetime as dt
-import hashlib
-import json
 import logging
-import os
-import pathlib
 import random
 import re
 from typing import Any
 from urllib.parse import urlparse
 
-from linkedin_mcp_server.config import get_config
 from linkedin_mcp_server.core.exceptions import RateLimitError
 from linkedin_mcp_server.core.throttle import throttle_evidence, throttled_count
 
@@ -41,11 +35,6 @@ _CREDITS_PATH = "/sales-api/salesApiCredits"
 _SEND_TIMEOUT = 15.0
 _LEAD_URL = re.compile(r"^/sales/lead/[^/]+,[^/]+,[^/]+/?$")
 
-DAILY_CAP = int(os.environ.get("DPI_SALESNAV_INMAIL_DAILY_CAP", "15"))
-_STATE_DIR = pathlib.Path(
-    os.environ.get("DPI_SALESNAV_STATE_DIR", "~/.dpi-salesnav")
-).expanduser()
-
 
 def _normalized(text: str) -> str:
     return " ".join(text.split())
@@ -64,34 +53,6 @@ def validate_lead_url(url: str) -> str:
             "(sales_nav_url from salesnav_company_people)"
         )
     return f"https://www.linkedin.com{parsed.path.rstrip('/')}"
-
-
-# Local send log, one per browser profile, kept outside the profile tree
-# because rotating a session deletes the profile's parent directory.
-def _log_path() -> pathlib.Path:
-    profile = str(pathlib.Path(get_config().browser.user_data_dir).expanduser())
-    key = hashlib.sha256(profile.encode()).hexdigest()[:12]
-    return _STATE_DIR / f"inmail-{key}.jsonl"
-
-
-def sent_today() -> int:
-    path = _log_path()
-    if not path.exists():
-        return 0
-    today = dt.date.today().isoformat()
-    return sum(
-        1
-        for line in path.read_text().splitlines()
-        if line.startswith(f'{{"date": "{today}"')
-    )
-
-
-def _log_send(entry: dict[str, Any]) -> None:
-    path = _log_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    line = {"date": dt.date.today().isoformat(), **entry}
-    with path.open("a") as f:
-        f.write(json.dumps(line, ensure_ascii=False) + "\n")
 
 
 def _credits(recorder: SalesApiRecorder) -> int | None:
@@ -121,12 +82,6 @@ async def send_inmail(
     *,
     confirm_send: bool,
 ) -> dict[str, Any]:
-    if confirm_send and sent_today() >= DAILY_CAP:
-        raise SendRefused(
-            f"Daily cap reached: {DAILY_CAP} messages sent today from this "
-            "account (DPI_SALESNAV_INMAIL_DAILY_CAP)."
-        )
-
     recorder = SalesApiRecorder(page)
     recorder.install()
     try:
@@ -172,8 +127,6 @@ async def send_inmail(
             "subject": typed_subject,
             "body_chars": len(typed_body),
             "inmail_credits": _credits(recorder),
-            "sent_today_before": sent_today(),
-            "daily_cap": DAILY_CAP,
         }
 
         if not confirm_send:
@@ -219,13 +172,10 @@ async def send_inmail(
                     "Check the Sales Navigator inbox before retrying."
                 ),
             )
-            _log_send({"lead_url": lead_url, "status": "unconfirmed"})
             return result
 
-        _log_send({"lead_url": lead_url, "status": "sent", "subject": subject})
         result.update(
             status="sent",
-            sent_today=sent_today(),
             post_responses=[
                 {"status": r["status"], "path": urlparse(r["url"]).path} for r in posts
             ],

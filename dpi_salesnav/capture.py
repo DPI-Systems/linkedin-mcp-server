@@ -31,18 +31,26 @@ class SalesApiRecorder:
         self._page = page
         self._pending: list[asyncio.Task[None]] = []
         self.records: list[dict[str, Any]] = []
+        # Every response the page gets, any host, for diagnosing a load that
+        # never brought the data (host + path + status only).
+        self.seen: list[str] = []
 
+    # On the browser context, not the page: Sales Navigator can fetch its data
+    # through a service worker, and those responses are only reported there.
     def install(self) -> None:
-        self._page.on("response", self._handle_response)
+        self._page.context.on("response", self._handle_response)
 
     def remove(self) -> None:
         try:
-            self._page.remove_listener("response", self._handle_response)
+            self._page.context.remove_listener("response", self._handle_response)
         except Exception:
             logger.debug("Failed to remove sales-api listener", exc_info=True)
 
     def _handle_response(self, response: Any) -> None:
-        if not is_sales_api_response(response.url):
+        if len(self.seen) < 400:
+            parsed = urlparse(response.url)
+            self.seen.append(f"{parsed.netloc}{parsed.path[:80]}={response.status}")
+        if not is_sales_api_response(response.url) or not self._ours(response):
             return
 
         async def _read() -> None:
@@ -61,6 +69,13 @@ class SalesApiRecorder:
             )
 
         self._pending.append(asyncio.create_task(_read()))
+
+    def _ours(self, response: Any) -> bool:
+        """This page's own responses, or ones with no page (service worker)."""
+        try:
+            return response.frame.page == self._page
+        except Exception:
+            return True
 
     async def drain(self) -> None:
         pending, self._pending = self._pending, []

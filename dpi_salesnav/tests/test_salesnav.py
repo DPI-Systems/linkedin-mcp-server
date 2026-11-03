@@ -6,7 +6,13 @@ import pytest
 
 from dpi_salesnav.capture import is_sales_api_response
 from dpi_salesnav.inmail import validate_lead_url
-from dpi_salesnav.people import lead_from_hit, lead_search_url
+from dpi_salesnav.people import (
+    account_from_hit,
+    LeadFilters,
+    lead_from_hit,
+    lead_search_url,
+    region_breakdown,
+)
 
 HIT = {
     "fullName": "Ana Ejemplo ",
@@ -56,6 +62,7 @@ def test_lead_prefers_position_at_searched_company():
     ]
     assert lead["recent_activity"] == "2 Publicaciones recientes"
     assert lead["changed_jobs_recently"] is True
+    assert lead["promoted_recently"] is False
     assert lead["sales_nav_url"] == (
         "https://www.linkedin.com/sales/lead/ACwAAAexample,NAME_SEARCH,abcd"
     )
@@ -69,7 +76,7 @@ def test_lead_tolerates_missing_fields():
 
 
 def test_search_url_double_encodes_company_urn():
-    url = lead_search_url("42", None, 1)
+    url = lead_search_url("42")
     assert "urn%253Ali%253Aorganization%253A42" in url
     assert "page=" not in url
     query = unquote(url.split("query=", 1)[1])
@@ -77,10 +84,44 @@ def test_search_url_double_encodes_company_urn():
 
 
 def test_search_url_keywords_are_sanitized_and_paged():
-    url = lead_search_url("42", "CTO (Madrid), data", 3)
+    url = lead_search_url("42", LeadFilters(keywords="CTO (Madrid), data"), 3)
     query = unquote(url.split("query=", 1)[1])
-    assert query.startswith("(keywords:CTO  Madrid   data,filters:")
+    assert query.startswith("(keywords:CTO Madrid data,filters:")
     assert url.endswith("&page=3")
+
+
+def test_search_url_adds_each_filter():
+    filters = LeadFilters(
+        titles=("Responsable de licitaciones",),
+        seniority=("director", "cxo"),
+        functions=("sales", "business_development"),
+        regions=("105646813",),
+        posted_recently=True,
+        changed_jobs_recently=True,
+    )
+    query = unquote(lead_search_url("42", filters).split("query=", 1)[1])
+    assert (
+        "(type:CURRENT_TITLE,values:List((text:Responsable de licitaciones,"
+        "selectionType:INCLUDED)))"
+    ) in query
+    assert (
+        "(type:SENIORITY_LEVEL,values:List((id:220,selectionType:INCLUDED),"
+        "(id:310,selectionType:INCLUDED)))"
+    ) in query
+    assert "(type:FUNCTION,values:List((id:25," in query
+    assert "(id:4,selectionType:INCLUDED)" in query
+    assert "(type:REGION,values:List((id:105646813," in query
+    assert "(type:POSTED_ON_LINKEDIN,values:List((id:RPOL," in query
+    assert "(type:RECENTLY_CHANGED_JOBS,values:List((id:RPC," in query
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [{"seniority": ("boss",)}, {"functions": ("sales_ops",)}, {"regions": ("Spain",)}],
+)
+def test_filters_reject_unknown_values(kwargs):
+    with pytest.raises(ValueError):
+        LeadFilters(**kwargs)
 
 
 @pytest.mark.parametrize(
@@ -115,3 +156,77 @@ def test_only_sales_api_responses_are_captured():
     )
     assert not is_sales_api_response("https://www.linkedin.com/voyager/api/x")
     assert not is_sales_api_response("https://example.com/sales-api/x")
+
+
+def test_search_url_without_company():
+    url = lead_search_url(None, LeadFilters(keywords="LangChain", regions=("123",)))
+    query = unquote(url.split("query=", 1)[1])
+    assert "CURRENT_COMPANY" not in query
+    assert query == (
+        "(keywords:LangChain,filters:List((type:REGION,values:List("
+        "(id:123,selectionType:INCLUDED)))))"
+    )
+    assert unquote(
+        lead_search_url(None, LeadFilters(keywords="x")).split("query=")[1]
+    ) == ("(keywords:x)")
+
+
+def test_lead_without_company_takes_first_position():
+    lead = lead_from_hit(HIT, None)
+    assert lead["title"] == "Consejera"
+
+
+def test_region_breakdown_reads_geography_metadata():
+    payload = {
+        "metadata": {
+            "filters": [
+                {"singleFilterMetadata": {"type": "INDUSTRY", "values": []}},
+                {
+                    "aggregatedFilterMetadata": {
+                        "type": "GEOGRAPHY",
+                        "values": [
+                            {
+                                "type": "REGION",
+                                "values": [
+                                    {
+                                        "id": "1",
+                                        "displayValue": "Ciudad A",
+                                        "displayCount": "12 ",
+                                    },
+                                    {
+                                        "id": "2",
+                                        "displayValue": "País B",
+                                        "displayCount": "1,2K",
+                                    },
+                                ],
+                            },
+                            {"type": "POSTAL_CODE", "values": []},
+                        ],
+                    }
+                },
+            ]
+        }
+    }
+    assert region_breakdown(payload) == [
+        {"id": "1", "name": "Ciudad A", "count": 12},
+        {"id": "2", "name": "País B", "count": "1,2K"},
+    ]
+    assert region_breakdown({}) == []
+
+
+def test_account_from_hit_keeps_fields_to_choose_from():
+    account = account_from_hit(
+        {
+            "entityUrn": "urn:li:fs_salesCompany:40533922",
+            "companyName": "Empresa A SL Y Empresa B SL UTE",
+            "industry": "Servicios medioambientales",
+            "employeeCountRange": "De 11 a 50 empleados",
+            "geoRegion": "Sevilla, Andalucía",
+            "description": "x" * 400,
+        }
+    )
+    assert account["company_id"] == "40533922"
+    assert account["location"] == "Sevilla, Andalucía"
+    assert len(account["description"]) == 300
+    assert account["sales_nav_url"] == "https://www.linkedin.com/sales/company/40533922"
+    assert account_from_hit({"entityUrn": "urn:li:organization:1"}) is None
