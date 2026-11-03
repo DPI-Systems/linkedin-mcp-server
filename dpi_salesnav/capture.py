@@ -13,6 +13,8 @@ from urllib.parse import urlparse
 logger = logging.getLogger(__name__)
 
 SALES_API_PREFIX = "/sales-api/"
+# LinkedIn's human-verification (HIP / captcha) and checkpoint endpoints.
+CHALLENGE_MARKERS = ("/help/api/hip/", "/checkpoint/challenge")
 
 
 def is_sales_api_response(url: str) -> bool:
@@ -34,6 +36,8 @@ class SalesApiRecorder:
         # Every response the page gets, any host, for diagnosing a load that
         # never brought the data (host + path + status only).
         self.seen: list[str] = []
+        # Set when LinkedIn starts a human-verification check on this page.
+        self.challenge: str | None = None
 
     # On the browser context, not the page: Sales Navigator can fetch its data
     # through a service worker, and those responses are only reported there.
@@ -47,9 +51,11 @@ class SalesApiRecorder:
             logger.debug("Failed to remove sales-api listener", exc_info=True)
 
     def _handle_response(self, response: Any) -> None:
+        parsed = urlparse(response.url)
         if len(self.seen) < 400:
-            parsed = urlparse(response.url)
             self.seen.append(f"{parsed.netloc}{parsed.path[:80]}={response.status}")
+        if any(marker in parsed.path for marker in CHALLENGE_MARKERS):
+            self.challenge = parsed.path
         if not is_sales_api_response(response.url) or not self._ours(response):
             return
 

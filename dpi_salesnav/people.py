@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote, urlparse
 
-from linkedin_mcp_server.core.exceptions import RateLimitError
+from linkedin_mcp_server.core.exceptions import AccountRestrictedError, RateLimitError
 from linkedin_mcp_server.core.throttle import throttle_evidence, throttled_count
 
 from dpi_salesnav.capture import SalesApiRecorder
@@ -24,7 +24,7 @@ PAGE_SIZE = 25
 LEAD_SEARCH_PATH = "/sales-api/salesApiLeadSearch"
 _RESPONSE_TIMEOUT = 20.0
 # Pause between result pages, as a person paging through results would.
-_PAGE_PAUSE = (4.0, 9.0)
+_PAGE_PAUSE = (20.0, 40.0)
 
 _PROFILE_ID = re.compile(r"urn:li:fs_salesProfile:\(([^,]+),([^,]+),([^)]+)\)")
 _SAFE_KEYWORDS = re.compile(r"[^\w\s\-.&]", re.UNICODE)
@@ -226,6 +226,20 @@ def region_breakdown(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+class ChallengeShown(AccountRestrictedError):
+    """LinkedIn asked this session to prove it is human."""
+
+
+def _raise_if_challenged(recorder: SalesApiRecorder) -> None:
+    if recorder.challenge:
+        raise ChallengeShown(
+            "Sales Navigator sent no results while LinkedIn ran a "
+            f"human-verification check ({recorder.challenge}), which may be "
+            "invisible. Pause this account for a while instead of retrying; "
+            "if the browser window shows a check, solve it by hand."
+        )
+
+
 def _raise_if_throttled() -> None:
     if throttled_count():
         raise RateLimitError(
@@ -279,6 +293,9 @@ async def load_sales_json(page: Any, url: str, path: str, what: str) -> dict[str
                     return found[-1]["json"]
                 _raise_if_throttled()
                 await asyncio.sleep(0.5)
+            # Only now, with no data after the whole wait: LinkedIn may start
+            # this check in the background on loads that work fine.
+            _raise_if_challenged(recorder)
             if attempt == 0:
                 logger.info("No %s data after load; reloading once", what)
                 await page.reload(wait_until="domcontentloaded")

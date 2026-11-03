@@ -47,7 +47,7 @@ owner se crea con el entrypoint de upstream y no tendrá las herramientas de Sal
 - **`salesnav_get_thread(thread_id)`**: todos los mensajes de un hilo, del más antiguo al más reciente. Lo marca como leído.
 
 No hay topes ni horarios en el servidor: cuándo y cuánto se envía lo decide quien llama. Lo que sí hay son
-pausas aleatorias entre acciones dentro de cada herramienta (de 4 a 9 s entre páginas de resultados y de 0,5 a 2 s
+pausas aleatorias entre acciones dentro de cada herramienta (de 20 a 40 s entre páginas de resultados y de 0,5 a 2 s
 entre los pasos de escribir y enviar un mensaje), para que el ritmo sea el de una persona.
 
 Los selectores son atributos propios de Sales Nav (`data-anchor-send-inmail`,

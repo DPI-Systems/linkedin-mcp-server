@@ -13,7 +13,7 @@ from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
 from dpi_salesnav.capture import SalesApiRecorder
-from dpi_salesnav.people import _raise_if_throttled
+from dpi_salesnav.people import _raise_if_challenged, _raise_if_throttled
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +138,7 @@ async def _load(page: Any, url: str, want: Any) -> tuple[Any, list[dict[str, Any
                 return found[-1]["json"], list(recorder.records)
             _raise_if_throttled()
             await asyncio.sleep(0.5)
+        _raise_if_challenged(recorder)
         return None, list(recorder.records)
     finally:
         recorder.remove()

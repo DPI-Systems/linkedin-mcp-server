@@ -230,3 +230,19 @@ def test_account_from_hit_keeps_fields_to_choose_from():
     assert len(account["description"]) == 300
     assert account["sales_nav_url"] == "https://www.linkedin.com/sales/company/40533922"
     assert account_from_hit({"entityUrn": "urn:li:organization:1"}) is None
+
+
+def test_hip_challenge_is_reported_not_retried():
+    from types import SimpleNamespace
+
+    from dpi_salesnav.capture import SalesApiRecorder
+    from dpi_salesnav.people import ChallengeShown, _raise_if_challenged
+
+    recorder = SalesApiRecorder(page=None)
+    response = SimpleNamespace(
+        url="https://www.linkedin.com/help/api/hip/v2/initiate/sales-navigator",
+        status=200,
+    )
+    recorder._handle_response(response)
+    with pytest.raises(ChallengeShown):
+        _raise_if_challenged(recorder)
