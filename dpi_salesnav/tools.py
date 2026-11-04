@@ -17,6 +17,7 @@ from dpi_salesnav.inmail import (
     send_inmail,
     validate_lead_url,
 )
+from dpi_salesnav.article import TITLE_MAX, create_article, publish_article
 from dpi_salesnav.inbox import read_inbox, read_thread
 from dpi_salesnav.people import LeadFilters, company_people, search_companies
 
@@ -323,3 +324,107 @@ def register_salesnav_tools(
         """
         page = await _page(ctx, "salesnav_get_thread")
         return await read_thread(page, thread_id)
+
+    @mcp.tool(
+        timeout=max(tool_timeout, 600),
+        title="LinkedIn: Create Article",
+        annotations={"destructiveHint": True, "openWorldHint": True},
+        tags={"article", "actions"},
+    )
+    @tool_errors
+    async def salesnav_create_article(
+        title: Annotated[str, Field(min_length=1, max_length=TITLE_MAX)],
+        markdown: str,
+        ctx: Context,
+        images_dir: str | None = None,
+        cover_image: str | None = None,
+        author: str | None = None,
+        publish_in: str | None = None,
+        publish: bool = False,
+        commentary: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Write a LinkedIn article (linkedin.com/pulse/...) from Markdown.
+
+        By default this only saves a draft and returns its URL, so a person
+        can review it in LinkedIn; publish the reviewed draft with
+        salesnav_publish_article. publish=true writes and publishes in one go,
+        only for text a person has already approved.
+
+        Markdown supported: # and ## (large heading), ### and deeper (small
+        heading), paragraphs, **bold**, *italic*, [links](https://...),
+        bullet and numbered lists, > quotes, ``` code blocks, --- dividers,
+        and images on their own line as ![caption](file.png). Tables, raw
+        HTML and strikethrough are not supported and come back in warnings.
+
+        Args:
+            title: Article title (up to 150 characters).
+            markdown: Article body in Markdown.
+            ctx: FastMCP context for progress reporting
+            images_dir: Folder the Markdown image paths are relative to.
+                Images must be local PNG, JPG, GIF or WebP files (8 MB max).
+            cover_image: Local path of the cover image (1280x720 works well).
+            author: "Publish as": the member's own name (default) or the
+                exact name of a LinkedIn page the member administers.
+            publish_in: Newsletter name to publish as an edition of it, which
+                LinkedIn sends to its subscribers. Default (null) is a
+                standalone article.
+            publish: Actually publish. Default false (draft only).
+            commentary: Text of the feed post that announces the article
+                when publishing.
+
+        Returns:
+            Dict with status ("draft", "published" or "unconfirmed"),
+            draft_id, draft_url, author, published_in, cover, saved (what
+            the reopened draft holds: images_uploaded, headings, lists,
+            quotes, code blocks, links, characters), warnings and, when
+            published, url.
+        """
+        page = await _page(ctx, "salesnav_create_article")
+        return await create_article(
+            page,
+            title=title,
+            markdown=markdown,
+            images_dir=images_dir,
+            cover_image=cover_image,
+            author=author,
+            publish_in=publish_in,
+            publish=publish,
+            commentary=commentary,
+        )
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="LinkedIn: Publish Article Draft",
+        annotations={"destructiveHint": True, "openWorldHint": True},
+        tags={"article", "actions"},
+    )
+    @tool_errors
+    async def salesnav_publish_article(
+        draft_id: str,
+        ctx: Context,
+        commentary: str | None = None,
+        confirm_publish: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Publish an article draft made by salesnav_create_article.
+
+        Without confirm_publish it only reports the draft's title, author and
+        destination (standalone article or a newsletter, which LinkedIn mails
+        to its subscribers). Pass confirm_publish=true once those are approved.
+
+        Args:
+            draft_id: draft_id from salesnav_create_article.
+            ctx: FastMCP context for progress reporting
+            commentary: Text of the feed post announcing the article.
+            confirm_publish: Actually publish. Default false.
+
+        Returns:
+            Dict with draft_id, draft_url, title, author, published_in, saved
+            and status ("not_published", "published" or "unconfirmed"; for
+            "unconfirmed", check LinkedIn before trying again).
+        """
+        page = await _page(ctx, "salesnav_publish_article")
+        return await publish_article(
+            page, draft_id, commentary=commentary, confirm_publish=confirm_publish
+        )

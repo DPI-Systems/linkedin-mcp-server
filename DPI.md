@@ -17,6 +17,7 @@ owner se crea con el entrypoint de upstream y no tendrá las herramientas de Sal
 | `dpi_salesnav/capture.py` | Escucha pasiva de las respuestas `/sales-api/` que la propia página pide (mismo patrón que `linkedin/conversations.py`; nunca hacemos peticiones propias a la API) |
 | `dpi_salesnav/people.py` | Empresa → personas (búsqueda de leads de Sales Nav) |
 | `dpi_salesnav/inmail.py` | Envío de InMail desde la ficha del lead |
+| `dpi_salesnav/article_markdown.py`, `dpi_salesnav/article.py` | Artículos de LinkedIn desde Markdown |
 | `dpi_salesnav/inbox.py` | Buzón de Sales Nav: lista de hilos y mensajes de un hilo |
 | `dpi_salesnav/tools.py` | Registro MCP |
 
@@ -45,6 +46,17 @@ owner se crea con el entrypoint de upstream y no tendrá las herramientas de Sal
 - **`salesnav_inbox(limit=20)`**: los 20 hilos más recientes del buzón de Sales Nav, con el contacto, el último
   mensaje, `awaiting_their_reply` (el último mensaje es nuestro) y `they_replied`. Abrir el buzón abre su hilo más reciente y lo marca como leído.
 - **`salesnav_get_thread(thread_id)`**: todos los mensajes de un hilo, del más antiguo al más reciente. Lo marca como leído.
+
+- **`salesnav_create_article(title, markdown, images_dir?, cover_image?, author?, publish_in?, publish=false, commentary?)`**:
+  escribe un artículo de LinkedIn (`/pulse/...`) desde Markdown y **por defecto solo deja un borrador** y devuelve
+  `draft_url`. Admite `#`/`##` (titular), `###` (subtitular), negrita, cursiva, enlaces, listas, citas, código,
+  separadores e imágenes locales en su propia línea (`![pie de foto](imagen.png)`), además de la portada. Tablas,
+  HTML y tachado vuelven en `warnings`. `author` es "publicar como" (tú o una página que administres) y `publish_in`
+  una newsletter: **por defecto es artículo individual**, porque una edición de newsletter se envía a sus suscriptores.
+  Tras guardar, reabre el borrador y devuelve en `saved` lo que LinkedIn guardó de verdad (imágenes subidas,
+  titulares, listas...).
+- **`salesnav_publish_article(draft_id, commentary?, confirm_publish=false)`**: publica un borrador ya revisado.
+  Sin `confirm_publish` solo dice título, autor y destino.
 
 No hay topes ni horarios en el servidor: cuándo y cuánto se envía lo decide quien llama. Lo que sí hay son
 pausas aleatorias entre acciones dentro de cada herramienta (de 20 a 40 s entre páginas de resultados y de 0,5 a 2 s
