@@ -19,6 +19,7 @@ from dpi_salesnav.inmail import (
 )
 from dpi_salesnav.article import TITLE_MAX, create_article, publish_article
 from dpi_salesnav.celebrations import read_celebrations
+from dpi_salesnav.contact_info import read_contact_info
 from dpi_salesnav.inbox import read_inbox, read_thread
 from dpi_salesnav.people import LeadFilters, company_people, search_companies
 
@@ -296,6 +297,37 @@ def register_salesnav_tools(
         """
         page = await _page(ctx, "salesnav_inbox")
         return await read_inbox(page, limit=limit)
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="LinkedIn: Contact Info",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"network"},
+    )
+    @tool_errors
+    async def linkedin_contact_info(
+        linkedin_username: str, ctx: Context
+    ) -> dict[str, Any]:
+        """
+        Read a connection's contact details: emails, phones and websites.
+
+        Opens the profile and its "Contact info" dialog, which LinkedIn shows
+        to connections only, and only with what each person chose to share.
+        Use this instead of get_person_profile's contact_info section, which
+        no longer finds the dialog.
+
+        Args:
+            linkedin_username: Profile username (the part after /in/).
+            ctx: FastMCP context for progress reporting
+
+        Returns:
+            Dict with url, linkedin_username, emails, phones (number, kind as
+            LinkedIn labels it, e.g. "móvil"), websites, and text: the whole
+            dialog as rendered, which also holds the birthday and the date you
+            connected when the person shares them.
+        """
+        page = await _page(ctx, "linkedin_contact_info")
+        return await read_contact_info(page, linkedin_username)
 
     @mcp.tool(
         timeout=tool_timeout,
