@@ -1,0 +1,23 @@
+# Postgres for the DPI CRM. The backend and frontend run on the host, next to
+# the MCP server that owns the LinkedIn browser.
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: dpi_crm_postgres
+    environment:
+      POSTGRES_USER: crm
+      POSTGRES_PASSWORD: crm
+      POSTGRES_DB: dpi_crm
+    ports:
+      - "127.0.0.1:5440:5432"
+    volumes:
+      - dpi_crm_postgres:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crm -d dpi_crm"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  dpi_crm_postgres:
