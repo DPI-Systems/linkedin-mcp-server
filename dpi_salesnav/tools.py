@@ -18,6 +18,7 @@ from dpi_salesnav.inmail import (
     validate_lead_url,
 )
 from dpi_salesnav.article import TITLE_MAX, create_article, publish_article
+from dpi_salesnav.celebrations import read_celebrations
 from dpi_salesnav.inbox import read_inbox, read_thread
 from dpi_salesnav.people import LeadFilters, company_people, search_companies
 
@@ -295,6 +296,45 @@ def register_salesnav_tools(
         """
         page = await _page(ctx, "salesnav_inbox")
         return await read_inbox(page, limit=limit)
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="LinkedIn: Network Updates (birthdays, job changes)",
+        annotations={"readOnlyHint": True, "openWorldHint": True},
+        tags={"network"},
+    )
+    @tool_errors
+    async def linkedin_network_updates(
+        ctx: Context,
+        categories: StrList | None = None,
+        max_results: Annotated[int, Field(ge=1, le=50)] = 30,
+    ) -> dict[str, Any]:
+        """
+        Read the "Catch up" updates of your connections: birthdays, job
+        changes, work anniversaries and education milestones.
+
+        Use it to find a reason to write to someone. To congratulate a
+        connection, pass its linkedin_username to send_message; to comment on
+        a job change or anniversary, the post_url is the announcement.
+
+        Args:
+            ctx: FastMCP context for progress reporting
+            categories: Any of "birthdays", "job_changes",
+                "work_anniversaries", "education". Default: all four, one page
+                load each.
+            max_results: Most entries returned per category (1-50).
+
+        Returns:
+            Dict with categories: {category: [entries]}. Each entry has name,
+            detail (LinkedIn's own line in the account's language, e.g. when
+            the birthday is or was, or the new position and company),
+            linkedin_username, profile_url and post_url (null for birthdays).
+            LinkedIn lists birthdays from the last days up to today only, and
+            only of people who share them. errors names a category that could
+            not be read.
+        """
+        page = await _page(ctx, "linkedin_network_updates")
+        return await read_celebrations(page, categories, max_results=max_results)
 
     @mcp.tool(
         timeout=tool_timeout,

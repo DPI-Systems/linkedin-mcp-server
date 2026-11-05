@@ -18,6 +18,7 @@ owner se crea con el entrypoint de upstream y no tendrá las herramientas de Sal
 | `dpi_salesnav/people.py` | Empresa → personas (búsqueda de leads de Sales Nav) |
 | `dpi_salesnav/inmail.py` | Envío de InMail desde la ficha del lead |
 | `dpi_salesnav/article_markdown.py`, `dpi_salesnav/article.py` | Artículos de LinkedIn desde Markdown |
+| `dpi_salesnav/celebrations.py` | Novedades de la red: cumpleaños, cambios de empleo, aniversarios |
 | `dpi_salesnav/inbox.py` | Buzón de Sales Nav: lista de hilos y mensajes de un hilo |
 | `dpi_salesnav/tools.py` | Registro MCP |
 
@@ -57,6 +58,12 @@ owner se crea con el entrypoint de upstream y no tendrá las herramientas de Sal
   titulares, listas...).
 - **`salesnav_publish_article(draft_id, commentary?, confirm_publish=false)`**: publica un borrador ya revisado.
   Sin `confirm_publish` solo dice título, autor y destino.
+- **`linkedin_network_updates(categories?, max_results=30)`**: solo lectura. Lee "Ponte al día" de Mi red:
+  `birthdays`, `job_changes`, `work_anniversaries` y `education` (por defecto las cuatro, una navegación cada una).
+  Por persona devuelve `name`, `detail` (la línea de LinkedIn en el idioma de la cuenta: cuándo es o fue el
+  cumpleaños, el puesto y la empresa nuevos), `linkedin_username`, `profile_url` y `post_url` (el anuncio del
+  cambio de empleo o aniversario, para comentar). Para felicitar se pasa `linkedin_username` al `send_message` de
+  upstream. LinkedIn solo enseña cumpleaños de los últimos días hasta hoy, y solo de quien los comparte.
 
 No hay topes ni horarios en el servidor: cuándo y cuánto se envía lo decide quien llama. Lo que sí hay son
 pausas aleatorias entre acciones dentro de cada herramienta (de 20 a 40 s entre páginas de resultados y de 0,5 a 2 s
