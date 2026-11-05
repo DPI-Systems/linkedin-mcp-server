@@ -1,0 +1,39 @@
+# LinkedIn MCP on dpi-lab, reachable only through dpi-caddy over the NetBird
+# mesh (https://linkedin-mcp.dev.dpi-systems.com/mcp, bearer token).
+name: dpi-linkedin-mcp
+
+services:
+  mcp:
+    image: dpi/linkedin-mcp:local
+    container_name: dpi-linkedin-mcp
+    restart: unless-stopped
+    environment:
+      # No browser on this host to import a session from: the session comes
+      # from the one-time login (see DPI.md).
+      AUTO_IMPORT_FROM_BROWSER: "false"
+      LOG_LEVEL: INFO
+    volumes:
+      # The LinkedIn session (cookies, profile). Never in the repo.
+      - /opt/dpi/data/linkedin-mcp/cuenta1:/home/pwuser/.linkedin-mcp
+    # No published port: Caddy reaches it on the dpi-dev network, and it
+    # checks the mesh address and the token first.
+    networks:
+      - dpi-dev
+    shm_size: 1gb
+    mem_limit: 2g
+
+  # One-shot: `docker compose run --rm -p 127.0.0.1:6080:6080 login`
+  login:
+    image: dpi/linkedin-mcp:local
+    profiles: ["login"]
+    environment:
+      AUTO_IMPORT_FROM_BROWSER: "false"
+    volumes:
+      - /opt/dpi/data/linkedin-mcp/cuenta1:/home/pwuser/.linkedin-mcp
+    shm_size: 1gb
+    command: ["--login", "--login-viewer"]
+
+networks:
+  dpi-dev:
+    name: dpi-dev
+    external: true
