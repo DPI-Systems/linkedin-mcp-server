@@ -6,6 +6,7 @@ One navigation per results page. The people come from the
 
 import asyncio
 import logging
+import os
 import random
 import re
 from collections import Counter
@@ -25,6 +26,13 @@ LEAD_SEARCH_PATH = "/sales-api/salesApiLeadSearch"
 _RESPONSE_TIMEOUT = 20.0
 # Pause between result pages, as a person paging through results would.
 _PAGE_PAUSE = (20.0, 40.0)
+# Least time between two Sales Navigator searches, across calls: LinkedIn
+# answered a burst of searches with human-verification checks, each one sooner
+# than the last. A pause, not a refusal: a search that comes too soon waits.
+MIN_SEARCH_GAP_ENV = "DPI_SALESNAV_MIN_SEARCH_GAP_SECONDS"
+_SEARCH_GAP = 20.0
+_SEARCH_JITTER = 10.0
+_last_search: float | None = None
 
 _PROFILE_ID = re.compile(r"urn:li:fs_salesProfile:\(([^,]+),([^,]+),([^)]+)\)")
 _SAFE_KEYWORDS = re.compile(r"[^\w\s\-.&]", re.UNICODE)
@@ -273,6 +281,29 @@ async def page_diagnosis(page: Any, recorder: SalesApiRecorder) -> str:
     )
 
 
+def _search_gap() -> float:
+    try:
+        return max(0.0, float(os.environ.get(MIN_SEARCH_GAP_ENV, _SEARCH_GAP)))
+    except ValueError:
+        return _SEARCH_GAP
+
+
+async def wait_for_search_turn() -> float:
+    """Sleep until the gap since the previous search has passed; return the wait."""
+    global _last_search
+    loop = asyncio.get_running_loop()
+    waited = 0.0
+    if _last_search is not None:
+        gap = _search_gap()
+        due = _last_search + gap + random.uniform(0.0, _SEARCH_JITTER if gap else 0.0)
+        waited = max(0.0, due - loop.time())
+        if waited:
+            logger.info("Waiting %.0f s before the next Sales Navigator search", waited)
+            await asyncio.sleep(waited)
+    _last_search = loop.time()
+    return waited
+
+
 async def load_sales_json(page: Any, url: str, path: str, what: str) -> dict[str, Any]:
     """Open ``url`` and return the newest ``path`` JSON its load brings.
 
@@ -280,6 +311,7 @@ async def load_sales_json(page: Any, url: str, path: str, what: str) -> dict[str
     network for them again; a reload makes it ask, as it would for a person
     pressing F5. One reload at most.
     """
+    await wait_for_search_turn()
     recorder = SalesApiRecorder(page)
     recorder.install()
     try:
