@@ -12,11 +12,14 @@ services:
       # from the one-time login (see DPI.md).
       AUTO_IMPORT_FROM_BROWSER: "false"
       LOG_LEVEL: INFO
+      # Where linkedin_verification_open sends a person to solve a checkpoint:
+      # Caddy's mesh-only site in front of the viewer on port 6080.
+      DPI_VIEWER_PUBLIC_URL: https://linkedin-verify.dev.dpi-systems.com
     volumes:
       # The LinkedIn session (cookies, profile). Never in the repo.
       - /opt/dpi/data/linkedin-mcp/cuenta1:/home/pwuser/.linkedin-mcp
-    # No published port: Caddy reaches it on the dpi-dev network, and it
-    # checks the mesh address and the token first.
+    # No published port: Caddy reaches 8000 (MCP) and 6080 (verification
+    # viewer, only while one is open) on the dpi-dev network.
     networks:
       - dpi-dev
     shm_size: 1gb

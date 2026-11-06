@@ -22,6 +22,11 @@ from dpi_salesnav.celebrations import read_celebrations
 from dpi_salesnav.contact_info import read_contact_info
 from dpi_salesnav.inbox import read_inbox, read_thread
 from dpi_salesnav.people import LeadFilters, company_people, search_companies
+from dpi_salesnav.verification import (
+    finish_verification,
+    open_verification,
+    verification_status,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -500,3 +505,82 @@ def register_salesnav_tools(
         return await publish_article(
             page, draft_id, commentary=commentary, confirm_publish=confirm_publish
         )
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="LinkedIn: Open Verification Viewer",
+        annotations={"readOnlyHint": False, "openWorldHint": True},
+        tags={"session"},
+    )
+    @tool_errors
+    async def linkedin_verification_open() -> dict[str, Any]:
+        """
+        Let a person solve a LinkedIn checkpoint in this server's own browser.
+
+        Call it when a tool fails with account_restricted or auth_required, or
+        LinkedIn shows a captcha, a code request or a verification page. It
+        opens the browser on the stored session (without the session check
+        that fails on a checkpoint) and returns viewer_url, a noVNC page
+        showing that browser. Give the URL to the user and wait for them: do
+        not solve the check yourself and do not call other LinkedIn tools
+        meanwhile. Then call linkedin_verification_status, and
+        linkedin_verification_finish once they are done. The viewer closes on
+        its own after 30 minutes.
+
+        Returns:
+            Dict with viewer_url, expires_in_seconds, page_url, state
+            ("restricted", "challenge", "ok", "off_linkedin") and already_open.
+        """
+        return await open_verification()
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="LinkedIn: Verification Status",
+        annotations={"readOnlyHint": True, "openWorldHint": False},
+        tags={"session"},
+    )
+    @tool_errors
+    async def linkedin_verification_status(
+        wait_seconds: Annotated[int, Field(ge=0, le=600)] = 0,
+    ) -> dict[str, Any]:
+        """
+        Where the verification browser is now, read from addresses only.
+
+        Never navigates or reloads, so waiting here costs LinkedIn nothing.
+        state "challenge" or "restricted" means the check is still there
+        (a sign-in or checkpoint route, the restriction route, or a captcha
+        frame inside the page); "ok" means none of those is left, so the
+        person is probably done: confirm with them, then call
+        linkedin_verification_finish.
+
+        Args:
+            wait_seconds: Wait up to this long for the check to clear,
+                checking every 2 s (capped below the tool timeout).
+
+        Returns:
+            Dict with open, state, page_url, waited_seconds and, while open,
+            viewer_url and expires_in_seconds.
+        """
+        return await verification_status(min(wait_seconds, max(0, tool_timeout - 20)))
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="LinkedIn: Finish Verification",
+        annotations={"readOnlyHint": False, "openWorldHint": False},
+        tags={"session"},
+    )
+    @tool_errors
+    async def linkedin_verification_finish() -> dict[str, Any]:
+        """
+        Close the verification viewer and the browser behind it.
+
+        The browser saves its cookies on the way out and the next LinkedIn
+        tool reopens it and checks the session as usual, so the work can go
+        on. If state is still "restricted" or "challenge", the check was not
+        cleared: tell the user instead of carrying on.
+
+        Returns:
+            Dict with state and page_url as they were before closing, closed
+            (whether a viewer was open) and reason.
+        """
+        return await finish_verification()

@@ -11,6 +11,7 @@ from linkedin_mcp_server import cli_main, server
 from linkedin_mcp_server.server_role import ServerRole
 
 from dpi_salesnav.tools import register_salesnav_tools
+from dpi_salesnav.verification_middleware import VerificationMiddleware
 
 _original = server.create_mcp_server
 
@@ -25,6 +26,8 @@ def create_mcp_server(*args, **kwargs):
             tool_timeout=kwargs.get("tool_timeout")
             or server.DEFAULT_TOOL_TIMEOUT_SECONDS,
         )
+        # Last, so it is the innermost and sees each tool's coded failure.
+        mcp.add_middleware(VerificationMiddleware())
     return mcp
 
 

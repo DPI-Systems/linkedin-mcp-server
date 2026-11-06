@@ -29,3 +29,22 @@ linkedin-mcp.dev.dpi-systems.com {
         }
     }
 }
+
+# --- LinkedIn: visor de verificacion (dpi-linkedin-mcp:6080) --------------
+# Va ANTES del comodin *.dev.dpi-systems.com.
+#
+# Lo abre la herramienta linkedin_verification_open para que una persona
+# resuelva un checkpoint de LinkedIn en el navegador del servidor. Solo
+# escucha mientras hay un visor abierto (30 min como maximo). Sin token
+# Bearer porque lo abre un navegador: la URL lleva un token de un solo uso en
+# el fragmento, y websockify rechaza la conexion sin el.
+linkedin-verify.dev.dpi-systems.com {
+    tls {
+        dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+    }
+
+    @fuera_de_la_mesh not remote_ip 100.81.0.0/16
+    respond @fuera_de_la_mesh "Solo desde la mesh" 403
+
+    reverse_proxy dpi-linkedin-mcp:6080
+}

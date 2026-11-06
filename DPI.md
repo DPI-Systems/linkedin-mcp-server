@@ -71,10 +71,30 @@ owner se crea con el entrypoint de upstream y no tendrá las herramientas de Sal
   perfil), solo al pulsar el enlace del perfil. Se reconoce por estructura (enlaces `mailto:`, redirecciones
   `/safety/go/` y líneas con forma de teléfono), no por las etiquetas traducidas. Cada persona decide qué comparte, así
   que muchos contactos no tienen email ni teléfono.
+- **`linkedin_verification_open()`**, **`linkedin_verification_status()`** y **`linkedin_verification_finish()`**: para
+  cuando LinkedIn pide una verificación (captcha, código por email, página de restricción). `open` abre el navegador del
+  servidor sobre la sesión guardada, sin la comprobación de sesión que falla justo en el checkpoint, y devuelve
+  `viewer_url`: un visor noVNC de ese mismo navegador para que una persona resuelva la verificación. No se vuelve a
+  iniciar sesión ni se rota el perfil. `status` dice dónde está la página leyendo solo su URL (`restricted`,
+  `challenge`, `ok`, `off_linkedin`) y no navega. `finish` quita el visor y cierra el navegador, que guarda las
+  cookies al salir; la siguiente herramienta lo vuelve a abrir y valida la sesión como siempre. El visor se cierra solo
+  a los 30 minutos. Solo funciona en el contenedor, donde el navegador está en una pantalla virtual.
+
+  No hace falta llamar a `open` a mano: si cualquier herramienta (también las de upstream) falla con
+  `account_restricted` o `auth_required`, el servidor abre el visor y el error empieza por `verification_required` e
+  incluye la URL. Así se distingue de un fallo del navegador, que se arregla con `close_session`. Mientras el visor está
+  abierto se rechazan todas las demás herramientas, `close_session` incluida, para que nadie navegue ni cierre la
+  ventana que está usando la persona. `status(wait_seconds=…)` espera hasta 10 minutos (menos que el timeout de la
+  herramienta) a que la verificación desaparezca, mirando cada 2 s sin recargar nada. Cuenta como verificación una ruta
+  de login, checkpoint o restricción, o un frame de captcha (`/help/api/hip/`) dentro de la página: el de Sales
+  Navigator no cambia la URL de la búsqueda.
 
 No hay topes ni horarios en el servidor: cuándo y cuánto se envía lo decide quien llama. Lo que sí hay son
 pausas aleatorias entre acciones dentro de cada herramienta (de 20 a 40 s entre páginas de resultados y de 0,5 a 2 s
-entre los pasos de escribir y enviar un mensaje), para que el ritmo sea el de una persona.
+entre los pasos de escribir y enviar un mensaje), para que el ritmo sea el de una persona. Además, entre dos búsquedas
+de Sales Navigator pasan al menos 20 s más un margen aleatorio de hasta 10 s, aunque sean de llamadas distintas: una
+búsqueda que llega antes espera, no se rechaza. LinkedIn respondió a una ráfaga de búsquedas con verificaciones cada
+vez más seguidas. Se cambia con `DPI_SALESNAV_MIN_SEARCH_GAP_SECONDS` (0 la quita).
 
 Los selectores son atributos propios de Sales Nav (`data-anchor-send-inmail`,
 `data-x-conversation-widget=compose-form`, `data-sales-action`, `overlay.close_overlay`), no texto
@@ -143,7 +163,7 @@ en otro sitio**: una cuenta, un navegador.
 | Servicio | `dpi_deploy/docker-compose.yml` → contenedor `dpi-linkedin-mcp`, red `dpi-dev`, sin puertos publicados |
 | Sesión de LinkedIn | `/opt/dpi/data/linkedin-mcp/cuenta1/` en dpi-lab (nunca en el repo) |
 | Código en dpi-lab | `/opt/dpi/linkedin-mcp/src/` (copiado con `dpi_deploy/sync.sh`) |
-| Proxy | bloque `linkedin-mcp.dev.dpi-systems.com` de `/opt/dpi/services/caddy/Caddyfile` (copia en `dpi_deploy/Caddyfile.snippet`) |
+| Proxy | bloques `linkedin-mcp.dev.dpi-systems.com` y `linkedin-verify.dev.dpi-systems.com` de `/opt/dpi/services/caddy/Caddyfile` (copia en `dpi_deploy/Caddyfile.snippet`) |
 | Token | `/opt/dpi/services/.secrets/LINKEDIN_MCP_TOKEN` (0600), montado en `dpi-caddy` |
 
 Dos barreras en Caddy: solo direcciones `100.81.0.0/16` (403 si no) y `Authorization: Bearer <token>` (401 si no). La
@@ -172,8 +192,15 @@ claude mcp add --scope user --transport http linkedin-dpi https://linkedin-mcp.d
 
 claude.ai web y móvil y ChatGPT no pueden usarlo: llaman al MCP desde sus servidores, que no ven la mesh.
 
-**Login, o cuando LinkedIn pida verificación** (el servidor no tiene pantalla; Chrome corre en una pantalla virtual y se
-ve con el visor noVNC por un túnel SSH):
+**Cuando LinkedIn pida verificación**: se le pide al LLM que llame a `linkedin_verification_open` (o lo hace él al ver
+`account_restricted` o `auth_required`). Devuelve una URL `https://linkedin-verify.dev.dpi-systems.com/login.html#token=…`
+que se abre desde cualquier equipo de la mesh. Se resuelve la verificación en ese navegador y después se llama a
+`linkedin_verification_finish`. El bloque `linkedin-verify.dev.dpi-systems.com` de Caddy solo admite la mesh, y no lleva
+token Bearer porque lo abre un navegador: el token de un solo uso va en el fragmento de la URL y websockify rechaza la
+conexión sin él. El MCP pasa la dirección pública en `DPI_VIEWER_PUBLIC_URL`.
+
+**Primer login** (no hay sesión guardada; Chrome corre en una pantalla virtual y se ve con el visor noVNC por un túnel
+SSH):
 
 ```bash
 ssh dpi@100.81.155.12 'cd /opt/dpi/linkedin-mcp/src/dpi_deploy && docker compose stop mcp && docker compose run -d --rm -p 127.0.0.1:6080:6080 --name dpi-linkedin-login login && sleep 20 && docker logs dpi-linkedin-login 2>&1 | grep login.html'
