@@ -1,6 +1,8 @@
 """Sales Navigator MCP tools."""
 
 import logging
+import pathlib
+import tempfile
 from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
@@ -13,10 +15,12 @@ from linkedin_mcp_server.tools.person import StrList
 
 from dpi_salesnav.inmail import (
     BODY_MAX,
+    INMAIL_TOOL_TIMEOUT,
     SUBJECT_MAX,
     send_inmail,
     validate_lead_url,
 )
+from dpi_salesnav.attachments import MAX_FILES, fetch_all
 from dpi_salesnav.article import TITLE_MAX, create_article, publish_article
 from dpi_salesnav.celebrations import read_celebrations
 from dpi_salesnav.contact_info import read_contact_info
@@ -225,7 +229,10 @@ def register_salesnav_tools(
         return result
 
     @mcp.tool(
-        timeout=tool_timeout,
+        # Downloading and uploading an 8 MB file, then waiting for the thread
+        # to list it, does not fit the default; a timeout after send is clicked
+        # would lose whether it was sent.
+        timeout=max(tool_timeout, INMAIL_TOOL_TIMEOUT),
         title="Sales Navigator: Send InMail",
         annotations={"destructiveHint": True, "openWorldHint": True},
         tags={"salesnav", "actions"},
@@ -237,14 +244,16 @@ def register_salesnav_tools(
         body: Annotated[str, Field(min_length=1, max_length=BODY_MAX)],
         ctx: Context,
         confirm_send: bool = False,
+        attachments: Annotated[StrList | None, Field(max_length=MAX_FILES)] = None,
     ) -> dict[str, Any]:
         """
-        Send a Sales Navigator message (InMail) to a lead.
+        Send a Sales Navigator message (InMail) to a lead, optionally with files.
 
         Without confirm_send this is a dry run: it opens the lead's composer,
-        types subject and body, checks the send button, clears the text and
-        closes the composer. Nothing is sent. Only pass confirm_send=true
-        after a person has approved this exact recipient and text.
+        types subject and body, attaches the files and checks each one is
+        shown, checks the send button, then removes the files, clears the text
+        and closes the composer. Nothing is sent. Only pass confirm_send=true
+        after a person has approved this exact recipient, text and files.
 
         Args:
             lead_url: sales_nav_url of the lead, from salesnav_company_people
@@ -254,18 +263,37 @@ def register_salesnav_tools(
             body: Message text.
             ctx: FastMCP context for progress reporting
             confirm_send: Actually send. Default false (preview only).
+            attachments: Files to attach (up to 5, 20 MB each). Each is an
+                https:// URL the server downloads (the file name comes from
+                Content-Disposition or the URL path, e.g.
+                .../Licitaciones%20con%20IA%20-%20Dossier.pdf), or a path on
+                the server inside DPI_INMAIL_ATTACHMENTS_DIR. Files on the
+                caller's own computer are not visible to the server. If a file
+                cannot be attached and verified, nothing is sent.
 
         Returns:
             Dict with status ("preview", "sent" or "unconfirmed"), recipient,
             kind ("inmail" or "message"), inmail_credits when the page
-            reported them.
+            reported them, and attachments [{name, bytes, source}]. A sent
+            message with files also returns attachments_in_thread, the names
+            the conversation shows.
             "unconfirmed" means send was clicked but not confirmed: check the
             Sales Navigator inbox and do not retry blindly.
         """
         url = validate_lead_url(lead_url)
-        page = await _page(ctx, "salesnav_send_inmail")
-        logger.info("Sales Navigator InMail to %s (send=%s)", url, confirm_send)
-        return await send_inmail(page, url, subject, body, confirm_send=confirm_send)
+        with tempfile.TemporaryDirectory(prefix="inmail-") as workdir:
+            # Fetched before LinkedIn is touched: a bad URL costs no page load.
+            files = await fetch_all(list(attachments or []), pathlib.Path(workdir))
+            page = await _page(ctx, "salesnav_send_inmail")
+            logger.info(
+                "Sales Navigator InMail to %s (send=%s, attachments=%s)",
+                url,
+                confirm_send,
+                [f.name for f in files],
+            )
+            return await send_inmail(
+                page, url, subject, body, confirm_send=confirm_send, attachments=files
+            )
 
     @mcp.tool(
         timeout=tool_timeout,
