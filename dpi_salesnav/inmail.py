@@ -14,8 +14,10 @@ finds its remove button, and what the thread must show after sending.
 
 import asyncio
 import logging
+import pathlib
 import random
 import re
+import tempfile
 from typing import Any
 from urllib.parse import urlparse
 
@@ -47,6 +49,7 @@ _SEND_TIMEOUT = 15.0
 # An 8 MB PDF over a home uplink; the thread may also take a while to list it.
 _UPLOAD_TIMEOUT = 120.0
 _REMOVE_TIMEOUT = 15.0
+_OPENER_TIMEOUT_MS = 20_000
 _THREAD_ATTACHMENT_TIMEOUT = 60.0
 INMAIL_TOOL_TIMEOUT = 360.0
 _LEAD_URL = re.compile(r"^/sales/lead/[^/]+,[^/]+,[^/]+/?$")
@@ -209,6 +212,42 @@ async def _names_present(
     return await root.evaluate(_NAMES_PRESENT, {"names": names, "exclude": exclude})
 
 
+_LEAD_PAGE_STATE = """() => ({
+    title: document.title,
+    anchors: [...document.querySelectorAll('button')]
+        .filter(b => [...b.attributes].some(a => a.name.startsWith('data-anchor')))
+        .map(b => Object.fromEntries([...b.attributes]
+            .filter(a => a.name !== 'class' && a.name !== 'style')
+            .map(a => [a.name, a.value.slice(0, 60)]))),
+    dialogs: [...document.querySelectorAll(
+        '[role=dialog], [role=alertdialog], dialog[open]')].map(d => ({
+            role: d.getAttribute('role') || d.tagName.toLowerCase(),
+            label: (d.getAttribute('aria-label') || '').slice(0, 80),
+            shown: d.checkVisibility ? d.checkVisibility() : !!d.offsetParent,
+            message_overlay: d.hasAttribute('data-message-overlay-container'),
+        })),
+    body_chars: document.body ? document.body.innerText.length : 0,
+    ready: document.readyState,
+})"""
+
+
+async def _describe_lead_page(page: Any) -> dict[str, Any]:
+    """What the lead page showed when its message button never appeared."""
+    state: dict[str, Any] = {}
+    try:
+        state = await page.evaluate(_LEAD_PAGE_STATE)
+    except Exception as e:
+        state = {"error": repr(e)[:200]}
+    try:
+        shot = pathlib.Path(tempfile.gettempdir()) / "inmail-no-button.png"
+        await page.screenshot(path=str(shot), full_page=False)
+        state["screenshot"] = str(shot)
+    except Exception:
+        pass
+    logger.warning("Lead page without a message button: %s", state)
+    return state
+
+
 async def _describe_controls(page: Any) -> list[dict[str, Any]]:
     try:
         return await page.locator(DIALOG).first.evaluate(_DESCRIBE_CONTROLS)
@@ -302,16 +341,37 @@ async def send_inmail(
     # this call before send is clicked.
     pending: dict[str, Any] = {"open": False, "subject": False, "names": []}
     try:
-        await page.goto(lead_url, wait_until="domcontentloaded")
         opener = page.locator(OPEN_COMPOSER).first
-        try:
-            await opener.wait_for(state="visible", timeout=20_000)
-        except Exception as e:
-            _raise_if_throttled()
-            raise SendRefused(
-                "This lead page has no Sales Navigator message button "
-                f"(page ended at {page.url})."
-            ) from e
+        # Measured on account 2: a lead page loaded seconds after another
+        # composer call sometimes renders without its message button, and the
+        # next load is fine. Nothing is typed yet, so one more load is safe.
+        for attempt in range(2):
+            await page.goto(lead_url, wait_until="domcontentloaded")
+            try:
+                await opener.wait_for(state="visible", timeout=_OPENER_TIMEOUT_MS)
+                break
+            except Exception as e:
+                _raise_if_throttled()
+                await recorder.drain()
+                refused = [
+                    {"status": r["status"], "path": urlparse(r["url"]).path}
+                    for r in recorder.records
+                    if r["status"] >= 400
+                ]
+                state = await _describe_lead_page(page)
+                if attempt == 0:
+                    logger.warning(
+                        "No message button on %s (sales-api errors %s); reloading",
+                        lead_url,
+                        refused,
+                    )
+                    await _human_pause(5.0, 9.0)
+                    continue
+                raise SendRefused(
+                    "This lead page has no Sales Navigator message button, "
+                    f"twice (page ended at {page.url}); nothing was typed or "
+                    f"sent. Sales API errors: {refused}. Page state: {state}"
+                ) from e
         await _human_pause()
         await opener.click()
         await page.locator(BODY).wait_for(state="visible", timeout=15_000)
