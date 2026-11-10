@@ -5,6 +5,11 @@ translated text: ``data-anchor-send-inmail`` opens the composer,
 ``data-x-conversation-widget=compose-form`` is the form, and its
 ``data-sales-action`` button sends. Without ``confirm_send`` the message is
 typed, read back and cleared again, so nothing leaves the browser.
+
+Attachments go through the composer's own ``input[type=file]``. Sales
+Navigator shows each one by its file name, which nobody translates, so the
+name (in text or in any attribute) is what proves a file is attached, what
+finds its remove button, and what the thread must show after sending.
 """
 
 import asyncio
@@ -17,6 +22,7 @@ from urllib.parse import urlparse
 from linkedin_mcp_server.core.exceptions import RateLimitError
 from linkedin_mcp_server.core.throttle import throttle_evidence, throttled_count
 
+from dpi_salesnav.attachments import Attachment
 from dpi_salesnav.capture import SalesApiRecorder
 
 logger = logging.getLogger(__name__)
@@ -28,11 +34,18 @@ SUBJECT = f"{FORM} [id^=compose-form-subject-]"
 BODY = f"{FORM} textarea[name=message]"
 SEND = f"{FORM} button[data-sales-action]"
 CLOSE = 'button[data-control-name="overlay.close_overlay"]'
+FILE_INPUT = f"{DIALOG} input[type=file]"
+REMOVE_MARK = "data-dpi-remove-attachment"
 
 SUBJECT_MAX = 200
 BODY_MAX = 1900
 _CREDITS_PATH = "/sales-api/salesApiCredits"
 _SEND_TIMEOUT = 15.0
+# An 8 MB PDF over a home uplink; the thread may also take a while to list it.
+_UPLOAD_TIMEOUT = 120.0
+_REMOVE_TIMEOUT = 15.0
+_THREAD_ATTACHMENT_TIMEOUT = 60.0
+INMAIL_TOOL_TIMEOUT = 360.0
 _LEAD_URL = re.compile(r"^/sales/lead/[^/]+,[^/]+,[^/]+/?$")
 
 
@@ -70,8 +83,14 @@ def _raise_if_throttled() -> None:
         )
 
 
-async def _discard(page: Any, has_subject: bool) -> None:
-    """Empty the composer and close it, so no typed text is left behind."""
+async def _discard(
+    page: Any, has_subject: bool, names: list[str] | None = None
+) -> list[str]:
+    """Empty the composer and close it, so no typed text or file is left behind.
+
+    Returns the attachment names that could not be removed.
+    """
+    left = await _remove_attachments(page, names) if names else []
     try:
         await page.locator(BODY).fill("")
         if has_subject:
@@ -79,6 +98,7 @@ async def _discard(page: Any, has_subject: bool) -> None:
         await page.locator(CLOSE).first.click()
     except Exception:
         logger.warning("Could not empty and close the InMail composer", exc_info=True)
+    return left
 
 
 async def _describe_buttons(send: Any) -> list[dict[str, Any]]:
@@ -95,6 +115,137 @@ async def _describe_buttons(send: Any) -> list[dict[str, Any]]:
         return []
 
 
+# Which names appear in root (text or any attribute value), leaving out the
+# parts matched by `exclude` and every form field, whose value is our own text.
+_NAMES_PRESENT = """(root, {names, exclude}) => {
+    const clone = root.cloneNode(true);
+    const drop = 'input, textarea, script, style' + (exclude ? ', ' + exclude : '');
+    clone.querySelectorAll(drop).forEach(e => e.remove());
+    const norm = s => (s || '').replace(/\\s+/g, ' ');
+    const parts = [clone.textContent];
+    for (const el of [clone, ...clone.querySelectorAll('*')]) {
+        for (const a of el.attributes) parts.push(a.value);
+    }
+    const hay = norm(parts.join(' '));
+    const busy = !!clone.querySelector(
+        '[role=progressbar], progress, [aria-busy=true]'
+    );
+    return {found: names.filter(n => hay.includes(norm(n))), busy};
+}"""
+
+# Mark the button that removes the attachment called `name`: start at the
+# innermost element naming it and climb until a container holds exactly one
+# button other than send, never as far as the one holding the message box.
+_MARK_REMOVE = """(form, {name, mark}) => {
+    const norm = s => (s || '').replace(/\\s+/g, ' ');
+    const names = el => norm(el.textContent).includes(norm(name)) ||
+        [...el.attributes].some(a => norm(a.value).includes(norm(name)));
+    const hits = [...form.querySelectorAll('*')].filter(el =>
+        !el.matches('input, textarea') && names(el));
+    const innermost = hits.filter(el => !hits.some(o => o !== el && el.contains(o)));
+    for (const start of innermost) {
+        for (let el = start; el && el !== form; el = el.parentElement) {
+            if (el.querySelector('textarea')) break;
+            const buttons = [el, ...el.querySelectorAll('button')].filter(b =>
+                b.matches('button') && !b.matches('[data-sales-action]'));
+            if (buttons.length === 1) {
+                form.querySelectorAll('[' + mark + ']').forEach(b => b.removeAttribute(mark));
+                buttons[0].setAttribute(mark, '');
+                return true;
+            }
+            if (buttons.length > 1) break;
+        }
+    }
+    return false;
+}"""
+
+# Attributes of the dialog's controls (no text), for an error that has to be
+# fixed against a changed Sales Navigator.
+_DESCRIBE_CONTROLS = """root => [...root.querySelectorAll('button, input, label[for]')]
+    .slice(0, 40).map(e => Object.fromEntries(
+        [['tag', e.tagName.toLowerCase()],
+         ...[...e.attributes].filter(a => a.name !== 'class' && a.name !== 'style')
+            .map(a => [a.name, a.value.slice(0, 80)])]))"""
+
+
+async def _names_present(
+    page: Any, names: list[str], *, scope: str, exclude: str | None = None
+) -> dict[str, Any]:
+    root = page.locator(scope).first
+    return await root.evaluate(_NAMES_PRESENT, {"names": names, "exclude": exclude})
+
+
+async def _describe_controls(page: Any) -> list[dict[str, Any]]:
+    try:
+        return await page.locator(DIALOG).first.evaluate(_DESCRIBE_CONTROLS)
+    except Exception:
+        return []
+
+
+async def _attach(page: Any, attachments: list[Attachment]) -> None:
+    """Hand the files to the composer and wait until each one is shown."""
+    inputs = page.locator(FILE_INPUT)
+    if await inputs.count() != 1:
+        raise SendRefused(
+            "Could not identify exactly one file input in the composer, so "
+            "nothing was attached or sent. Controls found: "
+            f"{await _describe_controls(page)}"
+        )
+    names = [a.name for a in attachments]
+    if await inputs.get_attribute("multiple") is None and len(attachments) > 1:
+        for attachment in attachments:
+            await inputs.set_input_files(str(attachment.path))
+            await _human_pause(0.5, 1.2)
+    else:
+        await inputs.set_input_files([str(a.path) for a in attachments])
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _UPLOAD_TIMEOUT
+    state: dict[str, Any] = {"found": [], "busy": True}
+    while loop.time() < deadline:
+        _raise_if_throttled()
+        state = await _names_present(page, names, scope=FORM)
+        if len(state["found"]) == len(names) and not state["busy"]:
+            send = page.locator(SEND)
+            if await send.count() == 1 and await send.is_enabled():
+                return
+        await asyncio.sleep(1.0)
+    missing = sorted(set(names) - set(state["found"]))
+    raise SendRefused(
+        "The attachment could not be verified in the composer "
+        f"(not shown: {missing}, upload still busy: {state['busy']}); "
+        "nothing was sent. Controls found: "
+        f"{await _describe_controls(page)}"
+    )
+
+
+async def _remove_attachments(page: Any, names: list[str]) -> list[str]:
+    """Remove each named attachment; return the names still in the composer."""
+    form = page.locator(FORM).first
+    for name in names:
+        try:
+            if not await form.evaluate(
+                _MARK_REMOVE, {"name": name, "mark": REMOVE_MARK}
+            ):
+                continue
+            await page.locator(f"{FORM} [{REMOVE_MARK}]").first.click()
+            await _human_pause(0.4, 1.0)
+        except Exception:
+            logger.warning("Could not remove attachment %s", name, exc_info=True)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _REMOVE_TIMEOUT
+    left = names
+    while loop.time() < deadline:
+        try:
+            left = (await _names_present(page, names, scope=FORM))["found"]
+        except Exception:
+            return names
+        if not left:
+            return []
+        await asyncio.sleep(0.5)
+    return left
+
+
 async def _human_pause(low: float = 0.8, high: float = 2.0) -> None:
     await asyncio.sleep(random.uniform(low, high))
 
@@ -106,9 +257,15 @@ async def send_inmail(
     body: str,
     *,
     confirm_send: bool,
+    attachments: list[Attachment] | None = None,
 ) -> dict[str, Any]:
+    attachments = attachments or []
+    names = [a.name for a in attachments]
     recorder = SalesApiRecorder(page)
     recorder.install()
+    # What is in the composer and has to be taken out again if anything stops
+    # this call before send is clicked.
+    pending: dict[str, Any] = {"open": False, "subject": False, "names": []}
     try:
         await page.goto(lead_url, wait_until="domcontentloaded")
         opener = page.locator(OPEN_COMPOSER).first
@@ -127,6 +284,7 @@ async def send_inmail(
 
         recipient = await page.locator(DIALOG).first.get_attribute("aria-label")
         has_subject = await page.locator(SUBJECT).count() > 0
+        pending.update(open=True, subject=has_subject)
         if has_subject:
             await page.locator(SUBJECT).fill(subject)
             await _human_pause(0.5, 1.2)
@@ -138,19 +296,19 @@ async def send_inmail(
             await page.locator(SUBJECT).input_value() if has_subject else None
         )
         if typed_body != body or (has_subject and typed_subject != subject):
-            await _discard(page, has_subject)
             raise SendRefused("The composer did not keep the text that was typed.")
         send = page.locator(SEND)
         if await send.count() != 1:
             buttons = await _describe_buttons(send)
             await recorder.drain()
-            credits = _credits(recorder)
-            await _discard(page, has_subject)
             raise SendRefused(
                 "Could not identify exactly one send button; nothing was sent and "
                 f"the composer was emptied. Buttons found: {buttons}. "
-                f"InMail credits reported: {credits}."
+                f"InMail credits reported: {_credits(recorder)}."
             )
+        if attachments:
+            pending["names"] = names
+            await _attach(page, attachments)
         send_enabled = await send.is_enabled()
 
         await recorder.drain()
@@ -161,32 +319,43 @@ async def send_inmail(
             "subject": typed_subject,
             "body_chars": len(typed_body),
             "inmail_credits": _credits(recorder),
+            "attachments": [a.describe() for a in attachments],
         }
 
         if not confirm_send:
-            await page.locator(BODY).fill("")
-            if has_subject:
-                await page.locator(SUBJECT).fill("")
-            await page.locator(CLOSE).first.click()
+            left = await _discard(page, has_subject, names)
+            pending["open"] = False
+            if left:
+                raise SendRefused(
+                    "Dry run: the attachment was verified but could not be "
+                    f"removed again ({left} still shown) before closing the "
+                    "composer. Nothing was sent; check the composer for this "
+                    "lead before the next message."
+                )
             result.update(
                 status="preview",
                 send_button_enabled=send_enabled,
+                attachments_verified=bool(attachments),
                 message="Nothing was sent. Call again with confirm_send=true to send.",
             )
             return result
 
         if not send_enabled:
-            await _discard(page, has_subject)
             raise SendRefused(
                 "The send button stayed disabled after typing; nothing was sent "
                 f"(InMail credits reported: {result['inmail_credits']})."
             )
 
         recorder.records.clear()
+        pending["open"] = False
         await send.click()
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + _SEND_TIMEOUT
+        deadline = (
+            loop.time() + _SEND_TIMEOUT + (_THREAD_ATTACHMENT_TIMEOUT if names else 0)
+        )
         posts: list[dict[str, Any]] = []
+        in_thread: list[str] = []
+        text_seen = False
         while loop.time() < deadline:
             await recorder.drain()
             _raise_if_throttled()
@@ -195,30 +364,50 @@ async def send_inmail(
             # The thread in the open conversation shows the message once Sales
             # Navigator has accepted it; a cleared box alone is not proof.
             thread = await page.locator(DIALOG).first.inner_text()
-            if cleared and _normalized(body) in _normalized(thread):
+            text_seen = cleared and _normalized(body) in _normalized(thread)
+            if names:
+                in_thread = (
+                    await _names_present(page, names, scope=DIALOG, exclude=FORM)
+                )["found"]
+            if text_seen and len(in_thread) == len(names):
                 break
             await asyncio.sleep(0.5)
         else:
+            missing = sorted(set(names) - set(in_thread))
             result.update(
                 status="unconfirmed",
+                text_in_thread=text_seen,
+                attachments_in_thread=in_thread,
                 post_responses=[
                     {"status": r["status"], "path": urlparse(r["url"]).path}
                     for r in posts
                 ],
                 message=(
-                    "Send was clicked but Sales Navigator did not confirm it. "
-                    "Check the Sales Navigator inbox before retrying."
+                    "Send was clicked but Sales Navigator did not confirm "
+                    + (
+                        f"the attachments {missing}"
+                        if text_seen and missing
+                        else "the message"
+                    )
+                    + ". Check the Sales Navigator inbox before retrying."
                 ),
             )
             return result
 
         result.update(
             status="sent",
+            attachments_in_thread=in_thread,
             post_responses=[
                 {"status": r["status"], "path": urlparse(r["url"]).path} for r in posts
             ],
         )
         return result
+    except BaseException:
+        if pending["open"]:
+            left = await _discard(page, pending["subject"], pending["names"])
+            if left:
+                logger.error("Attachments left in the InMail composer: %s", left)
+        raise
     finally:
         recorder.remove()
         await recorder.drain()
