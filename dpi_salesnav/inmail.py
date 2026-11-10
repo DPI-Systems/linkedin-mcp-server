@@ -118,6 +118,11 @@ async def _describe_buttons(send: Any) -> list[dict[str, Any]]:
 # Which names appear in root (text or any attribute value), leaving out the
 # parts matched by `exclude` and every form field, whose value is our own text.
 _NAMES_PRESENT = """(root, {names, exclude}) => {
+    const skeleton = el => [...el.querySelectorAll('*')].slice(0, 120).map(e =>
+        '  '.repeat(Math.min(depth(e, el), 12)) + e.tagName.toLowerCase() +
+        [...e.attributes].filter(a => a.name !== 'style')
+            .map(a => ' ' + a.name + '=' + a.value.slice(0, 40)).join('')).join('\\n');
+    const depth = (e, top) => { let d = 0; while (e && e !== top) { e = e.parentElement; d++; } return d; };
     const clone = root.cloneNode(true);
     const drop = 'input, textarea, script, style' + (exclude ? ', ' + exclude : '');
     clone.querySelectorAll(drop).forEach(e => e.remove());
@@ -127,10 +132,27 @@ _NAMES_PRESENT = """(root, {names, exclude}) => {
         for (const a of el.attributes) parts.push(a.value);
     }
     const hay = norm(parts.join(' '));
-    const busy = !!clone.querySelector(
-        '[role=progressbar], progress, [aria-busy=true]'
-    );
-    return {found: names.filter(n => hay.includes(norm(n))), busy};
+    // A progress bar can stay in the DOM once the upload is done, so it only
+    // counts while it is shown and short of its maximum (or indeterminate).
+    const skip = exclude ? [...root.querySelectorAll(exclude)] : [];
+    const busyBy = [...root.querySelectorAll(
+        'progress, [role=progressbar], [aria-busy=true]'
+    )].filter(e => !skip.some(x => x.contains(e))).map(e => {
+        const shown = e.checkVisibility ? e.checkVisibility() : !!e.offsetParent;
+        let done;
+        if (e.tagName === 'PROGRESS') {
+            done = e.position !== -1 && e.value >= e.max;
+        } else if (e.hasAttribute('aria-valuenow')) {
+            done = Number(e.getAttribute('aria-valuenow')) >=
+                Number(e.getAttribute('aria-valuemax') || 100);
+        } else {
+            done = false;
+        }
+        return {tag: e.tagName.toLowerCase(), shown, done,
+                value: e.tagName === 'PROGRESS' ? e.value : e.getAttribute('aria-valuenow')};
+    }).filter(b => b.shown && !b.done);
+    return {found: names.filter(n => hay.includes(norm(n))), busy: busyBy.length > 0,
+            busy_by: busyBy, skeleton: skeleton(clone)};
 }"""
 
 # Mark the button that removes the attachment called `name`: start at the
@@ -211,9 +233,10 @@ async def _attach(page: Any, attachments: list[Attachment]) -> None:
                 return
         await asyncio.sleep(1.0)
     missing = sorted(set(names) - set(state["found"]))
+    logger.warning("InMail composer after attaching:\n%s", state.get("skeleton"))
     raise SendRefused(
         "The attachment could not be verified in the composer "
-        f"(not shown: {missing}, upload still busy: {state['busy']}); "
+        f"(not shown: {missing}, upload still busy: {state.get('busy_by')}); "
         "nothing was sent. Controls found: "
         f"{await _describe_controls(page)}"
     )
@@ -336,6 +359,7 @@ async def send_inmail(
                 status="preview",
                 send_button_enabled=send_enabled,
                 attachments_verified=bool(attachments),
+                attachments_removed=names,
                 message="Nothing was sent. Call again with confirm_send=true to send.",
             )
             return result
