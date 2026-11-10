@@ -150,20 +150,32 @@ uv run --directory ~/Repos/linkedin-mcp-server python -m dpi_salesnav \
 - `--no-headless` para ver el navegador.
 - Tests offline: `uv run pytest dpi_salesnav/tests -q`.
 
-## Despliegue en dpi-lab (cuenta 1)
+## Despliegue en dpi-lab (cuentas 1 y 2)
 
 El MCP de la cuenta 1 vive en `dpi-lab` (Ubuntu, NetBird `100.81.155.12`, misma IP pública de casa) y **solo se
 alcanza por la mesh**: `https://linkedin-mcp.dev.dpi-systems.com/mcp`. Ese nombre resuelve a la IP de NetBird y el
 certificado sale por DNS-01, así que no hay nada publicado en internet. Mientras corre allí, **no se arranca la cuenta 1
 en otro sitio**: una cuenta, un navegador.
 
+Hay dos cuentas, cada una con su propio contenedor, perfil y dirección. Nunca comparten navegador:
+
+| Cuenta | Persona | MCP | Contenedor | Sesión en dpi-lab | En Claude Code |
+|---|---|---|---|---|---|
+| 1 | Fernando | `https://linkedin-mcp.dev.dpi-systems.com/mcp` | `dpi-linkedin-mcp` | `/opt/dpi/data/linkedin-mcp/cuenta1/` | `linkedin-dpi` |
+| 2 | Olga Yankovich | `https://linkedin-mcp-2.dev.dpi-systems.com/mcp` | `dpi-linkedin-mcp-2` | `/opt/dpi/data/linkedin-mcp/cuenta2/` | `linkedin-dpi-2` |
+
+Las dos usan el mismo token. Para repartir envíos, una sesión de Claude con los dos servidores conectados ve las
+herramientas dos veces (`mcp__linkedin-dpi__…` y `mcp__linkedin-dpi-2__…`) y elige la cuenta en cada llamada. Los
+InMails necesitan una licencia de Sales Navigator en esa cuenta. El visor automático de verificación
+(`linkedin-verify`) solo llega todavía a la cuenta 1; la cuenta 2 se verifica por túnel SSH, como en el primer login.
+
 | Pieza | Dónde |
 |---|---|
 | Imagen | `dpi_deploy/Dockerfile`: la del proyecto original sin tocar (`dpi/linkedin-mcp-base:local`) más `dpi_salesnav` |
-| Servicio | `dpi_deploy/docker-compose.yml` → contenedor `dpi-linkedin-mcp`, red `dpi-dev`, sin puertos publicados |
-| Sesión de LinkedIn | `/opt/dpi/data/linkedin-mcp/cuenta1/` en dpi-lab (nunca en el repo) |
+| Servicio | `dpi_deploy/docker-compose.yml` → servicios `mcp` y `mcp2`, red `dpi-dev`, sin puertos publicados |
+| Sesión de LinkedIn | `/opt/dpi/data/linkedin-mcp/cuenta1/` y `cuenta2/` en dpi-lab (nunca en el repo) |
 | Código en dpi-lab | `/opt/dpi/linkedin-mcp/src/` (copiado con `dpi_deploy/sync.sh`) |
-| Proxy | bloques `linkedin-mcp.dev.dpi-systems.com` y `linkedin-verify.dev.dpi-systems.com` de `/opt/dpi/services/caddy/Caddyfile` (copia en `dpi_deploy/Caddyfile.snippet`) |
+| Proxy | bloques `linkedin-mcp.dev.dpi-systems.com`, `linkedin-mcp-2.dev.dpi-systems.com` y `linkedin-verify.dev.dpi-systems.com` de `/opt/dpi/services/caddy/Caddyfile` (copia en `dpi_deploy/Caddyfile.snippet`) |
 | Token | `/opt/dpi/services/.secrets/LINKEDIN_MCP_TOKEN` (0600), montado en `dpi-caddy` |
 
 Dos barreras en Caddy: solo direcciones `100.81.0.0/16` (403 si no) y `Authorization: Bearer <token>` (401 si no). La
@@ -217,10 +229,23 @@ LinkedIn a mano (Cmd+V pega la contraseña) y, cuando el visor se cierra, se arr
 ssh dpi@100.81.155.12 'cd /opt/dpi/linkedin-mcp/src/dpi_deploy && docker compose up -d mcp'
 ```
 
+Para la cuenta 2, lo mismo con `mcp2`, `login2` y el puerto 6081 (el enlace es `http://127.0.0.1:6081/login.html#token=…`
+y solo funciona en el equipo que abre el túnel):
+
+```bash
+ssh dpi@100.81.155.12 'cd /opt/dpi/linkedin-mcp/src/dpi_deploy && docker compose stop mcp2 && docker compose run -d --rm -p 127.0.0.1:6081:6080 --name dpi-linkedin-login-2 login2 && sleep 20 && docker logs dpi-linkedin-login-2 2>&1 | grep login.html'
+```
+
+```bash
+ssh -N -L 6081:127.0.0.1:6081 dpi@100.81.155.12
+```
+
+Al terminar: `docker compose up -d mcp2`.
+
 **Actualizar** (desde el Mac, tras cambiar código o traer upstream):
 
 ```bash
-dpi_deploy/sync.sh && ssh dpi@100.81.155.12 'cd /opt/dpi/linkedin-mcp/src && ./dpi_deploy/build.sh && cd dpi_deploy && docker compose up -d mcp'
+dpi_deploy/sync.sh && ssh dpi@100.81.155.12 'cd /opt/dpi/linkedin-mcp/src && ./dpi_deploy/build.sh && cd dpi_deploy && docker compose up -d mcp mcp2'
 ```
 
 **Logs:** `ssh dpi@100.81.155.12 docker logs -f dpi-linkedin-mcp`.

@@ -6,6 +6,14 @@ services:
   mcp:
     image: dpi/linkedin-mcp:local
     container_name: dpi-linkedin-mcp
+    # Chromium's profile lock names the host it was taken on. Stopping the
+    # container leaves an open browser's lock behind (measured: the process
+    # exits within 2 s without closing it). With a fixed name that lock names
+    # this host and a dead process, and Chromium takes it over; with Docker's
+    # random name every new container refused the profile as "in use on
+    # another computer". The login service keeps a random name, so a
+    # running login still blocks this one, as it should.
+    hostname: dpi-linkedin-mcp
     restart: unless-stopped
     environment:
       # No browser on this host to import a session from: the session comes
@@ -33,6 +41,38 @@ services:
       AUTO_IMPORT_FROM_BROWSER: "false"
     volumes:
       - /opt/dpi/data/linkedin-mcp/cuenta1:/home/pwuser/.linkedin-mcp
+    shm_size: 1gb
+    command: ["--login", "--login-viewer"]
+
+  # Account 2: the same server on its own session directory, behind its own
+  # Caddy site (https://linkedin-mcp-2.dev.dpi-systems.com/mcp). One account,
+  # one container, one browser: the two never share a profile.
+  mcp2:
+    image: dpi/linkedin-mcp:local
+    container_name: dpi-linkedin-mcp-2
+    # Fixed for the same reason as account 1's (stale profile locks).
+    hostname: dpi-linkedin-mcp-2
+    restart: unless-stopped
+    environment:
+      AUTO_IMPORT_FROM_BROWSER: "false"
+      LOG_LEVEL: INFO
+      # No DPI_VIEWER_PUBLIC_URL yet: linkedin-verify reaches account 1's
+      # container only, so account 2's viewer is reached by SSH tunnel.
+    volumes:
+      - /opt/dpi/data/linkedin-mcp/cuenta2:/home/pwuser/.linkedin-mcp
+    networks:
+      - dpi-dev
+    shm_size: 1gb
+    mem_limit: 2g
+
+  # One-shot: `docker compose run --rm -p 127.0.0.1:6081:6080 login2`
+  login2:
+    image: dpi/linkedin-mcp:local
+    profiles: ["login"]
+    environment:
+      AUTO_IMPORT_FROM_BROWSER: "false"
+    volumes:
+      - /opt/dpi/data/linkedin-mcp/cuenta2:/home/pwuser/.linkedin-mcp
     shm_size: 1gb
     command: ["--login", "--login-viewer"]
 

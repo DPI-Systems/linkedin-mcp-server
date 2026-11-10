@@ -48,3 +48,28 @@ linkedin-verify.dev.dpi-systems.com {
 
     reverse_proxy dpi-linkedin-mcp:6080
 }
+
+# --- LinkedIn MCP, cuenta 2 (dpi-linkedin-mcp-2) --------------------------
+# Va ANTES del comodin *.dev.dpi-systems.com. Mismas dos barreras y mismo
+# token que la cuenta 1: las dos cuentas son de DPI y las maneja el mismo equipo.
+linkedin-mcp-2.dev.dpi-systems.com {
+    tls {
+        dns cloudflare {env.CLOUDFLARE_API_TOKEN}
+    }
+
+    @fuera_de_la_mesh not remote_ip 100.81.0.0/16
+    respond @fuera_de_la_mesh "Solo desde la mesh" 403
+
+    @sin_token not header Authorization "Bearer {env.LINKEDIN_MCP_TOKEN}"
+    respond @sin_token "Falta el token" 401
+
+    reverse_proxy dpi-linkedin-mcp-2:8000 {
+        header_up Host localhost:8000
+        header_up -Origin
+        # Respuestas en streaming (SSE): sin buffer y sin cortar llamadas largas.
+        flush_interval -1
+        transport http {
+            read_timeout 30m
+        }
+    }
+}
