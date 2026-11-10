@@ -3,7 +3,8 @@
 The composer is synthetic: the attributes ``inmail.py`` selects on (the
 message button, the dialog, the compose form, the send button, a file input)
 around a pill that shows the file name with one button to remove it, a
-progress bar while "uploading", and a thread that lists a sent message. It is
+progress bar that stays in place once full (as Sales Navigator's does), and a
+thread that lists a sent message. It is
 a claim about the algorithm (a file is found and removed by its name, never by
 translated text), not about Sales Navigator's layout.
 """
@@ -51,14 +52,14 @@ PAGE = """
       document.body.appendChild(got);
       const pill = document.createElement('div');
       pill.className = 'pill';
-      pill.innerHTML = '<span class="n"></span><span role="progressbar"></span>' +
+      pill.innerHTML = '<span class="n"></span><progress max="100" value="30"></progress>' +
         '<button type="button" aria-label="Quitar">x</button>';
       pill.querySelector('.n').textContent = f.name;
       pill.querySelector('button').onclick = () => pill.remove();
       $('#files').appendChild(pill);
       if (!window.cfg.enabled_while_uploading) sendBtn().disabled = true;
       if (!window.cfg.stuck) setTimeout(() => {
-        pill.querySelector('[role=progressbar]').remove();
+        pill.querySelector('progress').value = 100;
         sendBtn().disabled = false;
       }, 300);
     }
@@ -144,6 +145,7 @@ async def test_dry_run_attaches_verifies_then_removes_and_closes(composer, dossi
     )
     assert result["status"] == "preview"
     assert result["attachments_verified"] is True
+    assert result["attachments_removed"] == [NAME]
     assert result["attachments"] == [
         {"name": NAME, "bytes": dossier.size, "source": "t"}
     ]
