@@ -102,6 +102,7 @@ def fast(monkeypatch):
     monkeypatch.setattr(inmail, "_REMOVE_TIMEOUT", 2.0)
     monkeypatch.setattr(inmail, "_SEND_TIMEOUT", 2.0)
     monkeypatch.setattr(inmail, "_THREAD_ATTACHMENT_TIMEOUT", 0.0)
+    monkeypatch.setattr(inmail, "_OPENER_TIMEOUT_MS", 1_500)
 
 
 @pytest.fixture
@@ -200,3 +201,31 @@ async def test_a_thread_without_the_file_is_unconfirmed(composer, dossier):
     assert result["text_in_thread"] is True
     assert result["attachments_in_thread"] == []
     assert NAME in result["message"]
+
+
+async def test_a_lead_page_without_its_button_is_loaded_once_more(composer, dossier):
+    page, _ = composer
+    loads = []
+
+    async def handler(route):
+        loads.append(route.request.url)
+        html = PAGE if len(loads) > 1 else PAGE.replace("data-anchor-send-inmail", "")
+        await route.fulfill(content_type="text/html", body=html)
+
+    await page.add_init_script("window.cfg = {};")
+    await page.route("https://www.linkedin.com/**", handler)
+    result = await inmail.send_inmail(
+        page, LEAD, "Asunto", "Hola", confirm_send=False, attachments=[dossier]
+    )
+    assert result["status"] == "preview"
+    assert len(loads) == 2
+
+
+async def test_a_lead_page_that_never_shows_its_button_is_refused(composer, dossier):
+    page, serve = composer
+    await serve({}, PAGE.replace("data-anchor-send-inmail", ""))
+    with pytest.raises(inmail.SendRefused, match="twice"):
+        await inmail.send_inmail(
+            page, LEAD, "Asunto", "Hola", confirm_send=True, attachments=[dossier]
+        )
+    assert (await _state(page))["sent"] == 0
