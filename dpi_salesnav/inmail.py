@@ -32,7 +32,10 @@ DIALOG = "section[role=dialog][data-message-overlay-container]"
 FORM = "form[data-x-conversation-widget=compose-form]"
 SUBJECT = f"{FORM} [id^=compose-form-subject-]"
 BODY = f"{FORM} textarea[name=message]"
-SEND = f"{FORM} button[data-sales-action]"
+# Sales Navigator puts data-sales-action on other composer buttons too (copy,
+# the "Message IQ" draft helper, measured on an English-language account); the
+# send button is the one that carries aria-disabled, present in every state.
+SEND = f"{FORM} button[data-sales-action][aria-disabled]"
 CLOSE = 'button[data-control-name="overlay.close_overlay"]'
 FILE_INPUT = f"{DIALOG} input[type=file]"
 REMOVE_MARK = "data-dpi-remove-attachment"
@@ -109,6 +112,15 @@ async def _describe_buttons(send: Any) -> list[dict[str, Any]]:
                 action: e.getAttribute('data-sales-action'),
                 disabled: e.disabled || e.getAttribute('aria-disabled') === 'true',
                 type: e.getAttribute('type'),
+                attrs: Object.fromEntries([...e.attributes]
+                    .filter(a => a.name !== 'class' && a.name !== 'style')
+                    .map(a => [a.name, a.value.slice(0, 80)])),
+                parents: (() => { const out = []; let p = e.parentElement;
+                    for (let i = 0; p && i < 4; i++, p = p.parentElement)
+                        out.push(p.tagName.toLowerCase() + [...p.attributes]
+                            .filter(a => a.name !== 'style')
+                            .map(a => '[' + a.name + '=' + a.value.slice(0, 40) + ']').join(''));
+                    return out; })(),
             }))"""
         )
     except Exception:

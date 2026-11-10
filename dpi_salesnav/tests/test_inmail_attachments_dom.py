@@ -34,14 +34,16 @@ PAGE = """
     <div id="files"></div>
     <label><input type="file" id="file" hidden></label>
     <button type="button" aria-label="Emoji">:)</button>
-    <button type="button" data-sales-action onclick="send()">Enviar</button>
+    <button type="button" data-sales-action>copy</button>
+    <span><button type="button" data-sales-action data-x--miq aria-label="Create draft">AI</button></span>
+    <button type="button" data-sales-action aria-disabled="false" onclick="send()">Enviar</button>
   </form>
 </section>
 <script>
   const $ = s => document.querySelector(s);
   function openComposer() { $('#dialog').hidden = false; }
   function closeComposer() { $('#dialog').hidden = true; }
-  const sendBtn = () => $('[data-sales-action]');
+  const sendBtn = () => $('[data-sales-action][aria-disabled]');
   $('#file').addEventListener('change', e => {
     for (const f of e.target.files) {
       const got = document.createElement('i');
@@ -57,10 +59,11 @@ PAGE = """
       pill.querySelector('.n').textContent = f.name;
       pill.querySelector('button').onclick = () => pill.remove();
       $('#files').appendChild(pill);
-      if (!window.cfg.enabled_while_uploading) sendBtn().disabled = true;
+      if (!window.cfg.enabled_while_uploading) { sendBtn().disabled = true; sendBtn().setAttribute('aria-disabled', 'true'); }
       if (!window.cfg.stuck) setTimeout(() => {
         pill.querySelector('progress').value = 100;
         sendBtn().disabled = false;
+        sendBtn().setAttribute('aria-disabled', 'false');
       }, 300);
     }
   });
