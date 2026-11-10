@@ -41,9 +41,20 @@ owner se crea con el entrypoint de upstream y no tendrá las herramientas de Sal
 - **`salesnav_search_people(keywords?, titles?, seniority?, functions?, regions?, ...)`**: como la anterior pero en
   todas las empresas. Ambas devuelven `region_breakdown` (zonas de los resultados con su id): para filtrar por una
   ciudad sin conocer su id, se busca con la ciudad en `keywords`, se lee su id ahí y se repite con `regions`.
-- **`salesnav_send_inmail(lead_url, subject, body, confirm_send=false)`**: escritura.
-  - Sin `confirm_send` es una vista previa: escribe el texto, comprueba el botón de enviar, lo borra y cierra el formulario.
-  - Con `confirm_send=true` envía. Solo devuelve `sent` si el texto aparece en la conversación abierta.
+- **`salesnav_send_inmail(lead_url, subject, body, confirm_send=false, attachments?)`**: escritura.
+  - Sin `confirm_send` es una vista previa: escribe el texto, adjunta los ficheros y comprueba que cada uno aparece,
+    comprueba el botón de enviar, quita los adjuntos, borra el texto y cierra el formulario. Si no puede quitar un
+    adjunto, falla y lo dice.
+  - Con `confirm_send=true` envía. Solo devuelve `sent` si el texto y el nombre de cada adjunto aparecen en la
+    conversación abierta; `attachments_in_thread` dice cuáles.
+  - `attachments`: lista de hasta 5 ficheros de hasta 20 MB. Cada uno es una URL `https://` que el servidor descarga
+    a un temporal (el nombre sale de `Content-Disposition` o de la ruta de la URL) o una ruta dentro de
+    `DPI_INMAIL_ATTACHMENTS_DIR` en el contenedor (por defecto `/home/pwuser/.linkedin-mcp/attachments`, es decir
+    `/opt/dpi/data/linkedin-mcp/cuentaN/attachments/` en dpi-lab). Fuera de ese directorio no se lee nada: en el
+    contenedor está también la sesión. No se descarga de direcciones privadas ni por `http`. El servidor no ve el
+    disco de quien llama. Si un adjunto no se puede subir y verificar, no se envía nada y el formulario se vacía.
+  - El adjunto se pasa al `input[type=file]` del formulario y se reconoce por su nombre de fichero (en el texto o en
+    cualquier atributo), que no se traduce. Dos ficheros con el mismo nombre se rechazan.
   - `status: "unconfirmed"` significa que se pulsó enviar pero no hubo confirmación: revisa el buzón antes de reintentar.
 - **`salesnav_inbox(limit=20)`**: los 20 hilos más recientes del buzón de Sales Nav, con el contacto, el último
   mensaje, `awaiting_their_reply` (el último mensaje es nuestro) y `they_replied`. Abrir el buzón abre su hilo más reciente y lo marca como leído.

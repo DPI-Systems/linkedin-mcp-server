@@ -70,6 +70,31 @@ def _raise_if_throttled() -> None:
         )
 
 
+async def _discard(page: Any, has_subject: bool) -> None:
+    """Empty the composer and close it, so no typed text is left behind."""
+    try:
+        await page.locator(BODY).fill("")
+        if has_subject:
+            await page.locator(SUBJECT).fill("")
+        await page.locator(CLOSE).first.click()
+    except Exception:
+        logger.warning("Could not empty and close the InMail composer", exc_info=True)
+
+
+async def _describe_buttons(send: Any) -> list[dict[str, Any]]:
+    """What the send-button selector matched, by attributes only."""
+    try:
+        return await send.evaluate_all(
+            """els => els.map(e => ({
+                action: e.getAttribute('data-sales-action'),
+                disabled: e.disabled || e.getAttribute('aria-disabled') === 'true',
+                type: e.getAttribute('type'),
+            }))"""
+        )
+    except Exception:
+        return []
+
+
 async def _human_pause(low: float = 0.8, high: float = 2.0) -> None:
     await asyncio.sleep(random.uniform(low, high))
 
@@ -113,10 +138,19 @@ async def send_inmail(
             await page.locator(SUBJECT).input_value() if has_subject else None
         )
         if typed_body != body or (has_subject and typed_subject != subject):
+            await _discard(page, has_subject)
             raise SendRefused("The composer did not keep the text that was typed.")
         send = page.locator(SEND)
         if await send.count() != 1:
-            raise SendRefused("Could not identify exactly one send button.")
+            buttons = await _describe_buttons(send)
+            await recorder.drain()
+            credits = _credits(recorder)
+            await _discard(page, has_subject)
+            raise SendRefused(
+                "Could not identify exactly one send button; nothing was sent and "
+                f"the composer was emptied. Buttons found: {buttons}. "
+                f"InMail credits reported: {credits}."
+            )
         send_enabled = await send.is_enabled()
 
         await recorder.drain()
@@ -142,7 +176,11 @@ async def send_inmail(
             return result
 
         if not send_enabled:
-            raise SendRefused("The send button stayed disabled after typing.")
+            await _discard(page, has_subject)
+            raise SendRefused(
+                "The send button stayed disabled after typing; nothing was sent "
+                f"(InMail credits reported: {result['inmail_credits']})."
+            )
 
         recorder.records.clear()
         await send.click()
