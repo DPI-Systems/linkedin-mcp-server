@@ -229,3 +229,48 @@ async def test_a_lead_page_that_never_shows_its_button_is_refused(composer, doss
             page, LEAD, "Asunto", "Hola", confirm_send=True, attachments=[dossier]
         )
     assert (await _state(page))["sent"] == 0
+
+
+async def _through_wrapper(page, **kwargs):
+    from dpi_salesnav import failures
+
+    @failures.with_failure_artifacts
+    async def salesnav_send_inmail():
+        failures.use_page(page)
+        return await inmail.send_inmail(page, LEAD, "Asunto", "Hola", **kwargs)
+
+    return await salesnav_send_inmail()
+
+
+async def test_a_composer_that_never_opens_keeps_the_page(
+    composer, dossier, tmp_path, monkeypatch
+):
+    from dpi_salesnav import failures
+    from linkedin_mcp_server.error_handler import CodedToolError
+
+    monkeypatch.setenv(failures.FAILURES_DIR_ENV, str(tmp_path / "f"))
+    monkeypatch.setattr(inmail, "_COMPOSER_TIMEOUT_MS", 500)
+    page, serve = composer
+    await serve({}, PAGE.replace('onclick="openComposer()"', ""))
+    with pytest.raises(CodedToolError, match='step "open_composer"') as caught:
+        await _through_wrapper(page, confirm_send=False, attachments=[dossier])
+    assert "TimeoutError" in str(caught.value)
+    [run] = list((tmp_path / "f").iterdir())
+    assert (run / "viewport.jpg").stat().st_size > 0
+    assert "data-anchor-send-inmail" in (run / "page.html").read_text()
+
+
+async def test_a_refused_attachment_is_captured_before_the_composer_is_emptied(
+    composer, dossier, tmp_path, monkeypatch
+):
+    from dpi_salesnav import failures
+    from linkedin_mcp_server.error_handler import CodedToolError
+
+    monkeypatch.setenv(failures.FAILURES_DIR_ENV, str(tmp_path / "f"))
+    page, serve = composer
+    await serve({"stuck": True, "enabled_while_uploading": True})
+    with pytest.raises(CodedToolError, match='step "attach"'):
+        await _through_wrapper(page, confirm_send=True, attachments=[dossier])
+    [run] = list((tmp_path / "f").iterdir())
+    assert 'class="pill"' in (run / "page.html").read_text()
+    assert (await _state(page))["pills"] == 0

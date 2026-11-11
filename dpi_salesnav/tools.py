@@ -1,11 +1,15 @@
 """Sales Navigator MCP tools."""
 
+import base64
+import json
 import logging
 import pathlib
 import tempfile
 from typing import Annotated, Any
 
 from fastmcp import Context, FastMCP
+from fastmcp.tools import ToolResult
+from mcp.types import ImageContent, TextContent
 from pydantic import Field
 
 from linkedin_mcp_server.config.schema import DEFAULT_TOOL_TIMEOUT_SECONDS
@@ -23,6 +27,12 @@ from dpi_salesnav.inmail import (
 from dpi_salesnav.attachments import MAX_FILES, fetch_all
 from dpi_salesnav.article import TITLE_MAX, create_article, publish_article
 from dpi_salesnav.celebrations import read_celebrations
+from dpi_salesnav.failures import (
+    list_artifacts,
+    read_artifact,
+    use_page,
+    with_failure_artifacts,
+)
 from dpi_salesnav.contact_info import read_contact_info
 from dpi_salesnav.inbox import read_inbox, read_thread
 from dpi_salesnav.people import LeadFilters, company_people, search_companies
@@ -37,7 +47,9 @@ logger = logging.getLogger(__name__)
 
 async def _page(ctx: Context, tool_name: str) -> Any:
     await get_ready_extractor(ctx, tool_name=tool_name)
-    return (await get_or_create_browser()).page
+    page = (await get_or_create_browser()).page
+    use_page(page)
+    return page
 
 
 def _filters(
@@ -72,6 +84,7 @@ def register_salesnav_tools(
         tags={"salesnav", "company"},
     )
     @tool_errors
+    @with_failure_artifacts
     async def salesnav_company_people(
         company_id: str,
         ctx: Context,
@@ -152,6 +165,7 @@ def register_salesnav_tools(
         tags={"salesnav", "company", "search"},
     )
     @tool_errors
+    @with_failure_artifacts
     async def salesnav_search_companies(name: str, ctx: Context) -> dict[str, Any]:
         """
         Find companies by name with Sales Navigator account search.
@@ -184,6 +198,7 @@ def register_salesnav_tools(
         tags={"salesnav", "search"},
     )
     @tool_errors
+    @with_failure_artifacts
     async def salesnav_search_people(
         ctx: Context,
         keywords: str | None = None,
@@ -238,6 +253,7 @@ def register_salesnav_tools(
         tags={"salesnav", "actions"},
     )
     @tool_errors
+    @with_failure_artifacts
     async def salesnav_send_inmail(
         lead_url: str,
         subject: Annotated[str, Field(min_length=1, max_length=SUBJECT_MAX)],
@@ -306,6 +322,7 @@ def register_salesnav_tools(
         tags={"salesnav", "messaging"},
     )
     @tool_errors
+    @with_failure_artifacts
     async def salesnav_inbox(
         ctx: Context,
         limit: Annotated[int, Field(ge=1, le=20)] = 20,
@@ -338,6 +355,7 @@ def register_salesnav_tools(
         tags={"network"},
     )
     @tool_errors
+    @with_failure_artifacts
     async def linkedin_contact_info(
         linkedin_username: str, ctx: Context
     ) -> dict[str, Any]:
@@ -369,6 +387,7 @@ def register_salesnav_tools(
         tags={"network"},
     )
     @tool_errors
+    @with_failure_artifacts
     async def linkedin_network_updates(
         ctx: Context,
         categories: StrList | None = None,
@@ -412,6 +431,7 @@ def register_salesnav_tools(
         tags={"salesnav", "messaging"},
     )
     @tool_errors
+    @with_failure_artifacts
     async def salesnav_get_thread(thread_id: str, ctx: Context) -> dict[str, Any]:
         """
         Read every message of one Sales Navigator thread, oldest first.
@@ -437,6 +457,7 @@ def register_salesnav_tools(
         tags={"article", "actions"},
     )
     @tool_errors
+    @with_failure_artifacts
     async def salesnav_create_article(
         title: Annotated[str, Field(min_length=1, max_length=TITLE_MAX)],
         markdown: str,
@@ -505,6 +526,7 @@ def register_salesnav_tools(
         tags={"article", "actions"},
     )
     @tool_errors
+    @with_failure_artifacts
     async def salesnav_publish_article(
         draft_id: str,
         ctx: Context,
@@ -612,3 +634,67 @@ def register_salesnav_tools(
             (whether a viewer was open) and reason.
         """
         return await finish_verification()
+
+    @mcp.tool(
+        timeout=tool_timeout,
+        title="Debug: Get Failure Artifact",
+        annotations={"readOnlyHint": True, "openWorldHint": False},
+        tags={"debug"},
+    )
+    @tool_errors
+    async def get_failure_artifact(
+        artifact_id: str | None = None,
+        full_page: bool = False,
+        include_html: bool = False,
+    ) -> ToolResult:
+        """
+        Read what a failed Sales Navigator tool call left behind.
+
+        Every failure of a browser tool keeps a screenshot, the page HTML,
+        its URL, the exception with its traceback, and the step it was at,
+        under an id the error message names. Reads files on this server
+        only; LinkedIn is not touched.
+
+        Args:
+            artifact_id: The id from the error message. Omit to list the
+                newest 20 artifacts instead.
+            full_page: Return the whole-page screenshot instead of the
+                visible part.
+            include_html: Also return the page HTML (truncated to 200 000
+                characters).
+
+        Returns:
+            failure.json (tool, step, steps, url, exception_type,
+            exception_message, traceback, arguments, files, path) as text,
+            then the screenshot as an image.
+        """
+        if not artifact_id:
+            listing = {"artifacts": list_artifacts(20)}
+            return ToolResult(
+                content=[TextContent(type="text", text=json.dumps(listing, indent=2))],
+                structured_content=listing,
+            )
+        info, path = read_artifact(artifact_id.strip())
+        content: list[Any] = [
+            TextContent(
+                type="text", text=json.dumps(info, indent=2, ensure_ascii=False)
+            )
+        ]
+        shot = path / ("full_page.jpg" if full_page else "viewport.jpg")
+        if shot.is_file():
+            content.append(
+                ImageContent(
+                    type="image",
+                    data=base64.b64encode(shot.read_bytes()).decode(),
+                    mime_type="image/jpeg",
+                )
+            )
+        html = path / "page.html"
+        if include_html and html.is_file():
+            content.append(
+                TextContent(
+                    type="text",
+                    text=html.read_text(encoding="utf-8", errors="replace")[:200_000],
+                )
+            )
+        return ToolResult(content=content)
