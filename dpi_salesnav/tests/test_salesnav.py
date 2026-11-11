@@ -246,3 +246,27 @@ def test_hip_challenge_is_reported_not_retried():
     recorder._handle_response(response)
     with pytest.raises(ChallengeShown):
         _raise_if_challenged(recorder)
+
+
+def test_a_lead_page_counts_as_past_its_splash_by_title_or_text():
+    from dpi_salesnav.inmail import _half_rendered
+
+    splash = {"title": "Sales Navigator", "body_chars": 0}
+    assert not _half_rendered(splash)
+    assert not _half_rendered({**splash, "after_screenshot": splash})
+    assert _half_rendered({"title": "Ana Ejemplo | Sales Navigator", "body_chars": 0})
+    assert _half_rendered({**splash, "body_chars": 286})
+    assert _half_rendered({**splash, "after_screenshot": {"body_chars": 12}})
+    assert not _half_rendered({"error": "TimeoutError()"})
+
+
+def test_renderer_cpu_is_reported_busiest_first(monkeypatch):
+    from dpi_salesnav import page_health
+
+    monkeypatch.setattr(page_health, "renderer_cpu", lambda: {7: 12.0, 8: 3.5})
+    got = page_health.cpu_since({7: 2.0, 8: 3.0}, 20.0)
+    assert got["renderers"] == 2
+    assert got["busiest"][0] == {"pid": 7, "cpu_s": 10.0, "share": 0.5}
+    assert got["busiest"][1]["cpu_s"] == 0.5
+    monkeypatch.setattr(page_health, "renderer_cpu", dict)
+    assert page_health.cpu_since({}, 1.0) == {"available": False}
