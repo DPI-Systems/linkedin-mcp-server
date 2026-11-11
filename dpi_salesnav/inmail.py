@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 from linkedin_mcp_server.core.exceptions import RateLimitError
 from linkedin_mcp_server.core.throttle import throttle_evidence, throttled_count
 
+from dpi_salesnav import failures
 from dpi_salesnav.attachments import Attachment
 from dpi_salesnav.capture import SalesApiRecorder
 
@@ -50,6 +51,7 @@ _SEND_TIMEOUT = 15.0
 _UPLOAD_TIMEOUT = 120.0
 _REMOVE_TIMEOUT = 15.0
 _OPENER_TIMEOUT_MS = 20_000
+_COMPOSER_TIMEOUT_MS = 15_000
 _THREAD_ATTACHMENT_TIMEOUT = 60.0
 INMAIL_TOOL_TIMEOUT = 360.0
 _LEAD_URL = re.compile(r"^/sales/lead/[^/]+,[^/]+,[^/]+/?$")
@@ -346,7 +348,9 @@ async def send_inmail(
         # composer call sometimes renders without its message button, and the
         # next load is fine. Nothing is typed yet, so one more load is safe.
         for attempt in range(2):
+            failures.step("load_lead_page")
             await page.goto(lead_url, wait_until="domcontentloaded")
+            failures.step("find_message_button")
             try:
                 await opener.wait_for(state="visible", timeout=_OPENER_TIMEOUT_MS)
                 break
@@ -373,13 +377,15 @@ async def send_inmail(
                     f"sent. Sales API errors: {refused}. Page state: {state}"
                 ) from e
         await _human_pause()
+        failures.step("open_composer")
         await opener.click()
-        await page.locator(BODY).wait_for(state="visible", timeout=15_000)
+        await page.locator(BODY).wait_for(state="visible", timeout=_COMPOSER_TIMEOUT_MS)
         _raise_if_throttled()
 
         recipient = await page.locator(DIALOG).first.get_attribute("aria-label")
         has_subject = await page.locator(SUBJECT).count() > 0
         pending.update(open=True, subject=has_subject)
+        failures.step("type_text")
         if has_subject:
             await page.locator(SUBJECT).fill(subject)
             await _human_pause(0.5, 1.2)
@@ -392,6 +398,7 @@ async def send_inmail(
         )
         if typed_body != body or (has_subject and typed_subject != subject):
             raise SendRefused("The composer did not keep the text that was typed.")
+        failures.step("find_send_button")
         send = page.locator(SEND)
         if await send.count() != 1:
             buttons = await _describe_buttons(send)
@@ -403,6 +410,7 @@ async def send_inmail(
             )
         if attachments:
             pending["names"] = names
+            failures.step("attach")
             await _attach(page, attachments)
         send_enabled = await send.is_enabled()
 
@@ -418,6 +426,7 @@ async def send_inmail(
         }
 
         if not confirm_send:
+            failures.step("dry_run_cleanup")
             left = await _discard(page, has_subject, names)
             pending["open"] = False
             if left:
@@ -444,7 +453,9 @@ async def send_inmail(
 
         recorder.records.clear()
         pending["open"] = False
+        failures.step("send")
         await send.click()
+        failures.step("confirm_in_thread")
         loop = asyncio.get_running_loop()
         deadline = (
             loop.time() + _SEND_TIMEOUT + (_THREAD_ATTACHMENT_TIMEOUT if names else 0)
@@ -498,7 +509,11 @@ async def send_inmail(
             ],
         )
         return result
-    except BaseException:
+    except BaseException as exc:
+        if isinstance(exc, Exception):
+            # Before the composer is emptied and closed, which is what the
+            # screenshot would show otherwise.
+            await failures.snapshot(page)
         if pending["open"]:
             left = await _discard(page, pending["subject"], pending["names"])
             if left:

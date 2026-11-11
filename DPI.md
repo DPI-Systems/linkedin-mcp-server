@@ -56,6 +56,16 @@ owner se crea con el entrypoint de upstream y no tendrá las herramientas de Sal
   - El adjunto se pasa al `input[type=file]` del formulario y se reconoce por su nombre de fichero (en el texto o en
     cualquier atributo), que no se traduce. Dos ficheros con el mismo nombre se rechazan.
   - `status: "unconfirmed"` significa que se pulsó enviar pero no hubo confirmación: revisa el buzón antes de reintentar.
+- **Fallos de las herramientas de navegador** (todas las de arriba): cada fallo guarda, sin activar nada, una captura
+  de la parte visible y de la página entera, el HTML, la URL, la excepción con su traza, los argumentos y el paso en
+  que estaba (`load_lead_page`, `find_message_button`, `open_composer`, `type_text`, `find_send_button`, `attach`,
+  `dry_run_cleanup`, `send`, `confirm_in_thread`). En el InMail la captura se hace antes de vaciar y cerrar el
+  formulario. El error que recibe el cliente ya no es «Error calling tool»: dice el paso, el tipo y el mensaje de la
+  excepción, y termina con una línea JSON `{tool, step, exception_type, exception_message, failure_artifact}`.
+  Se guardan los 150 más recientes por cuenta en `/home/pwuser/.linkedin-mcp/failures/<id>/`, es decir
+  `/opt/dpi/data/linkedin-mcp/cuentaN/failures/<id>/` en dpi-lab (`DPI_FAILURE_ARTIFACTS_DIR` lo cambia).
+- **`get_failure_artifact(artifact_id?, full_page=false, include_html=false)`**: solo lee ficheros del servidor, no
+  toca LinkedIn. Con id devuelve `failure.json` y la captura como imagen; sin id, los 20 fallos más recientes.
 - **`salesnav_inbox(limit=20)`**: los 20 hilos más recientes del buzón de Sales Nav, con el contacto, el último
   mensaje, `awaiting_their_reply` (el último mensaje es nuestro) y `they_replied`. Abrir el buzón abre su hilo más reciente y lo marca como leído.
 - **`salesnav_get_thread(thread_id)`**: todos los mensajes de un hilo, del más antiguo al más reciente. Lo marca como leído.
