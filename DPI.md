@@ -57,6 +57,11 @@ owner se crea con el entrypoint de upstream y no tendrá las herramientas de Sal
     cualquier atributo), que no se traduce. Dos ficheros con el mismo nombre se rechazan.
   - `lead_load_seconds` son los segundos desde abrir la ficha del lead hasta ver su botón de mensaje (se espera hasta
     60 s), y `lead_load_attempts` vale 2 si hizo falta recargarla.
+  - `lead_load_path` dice qué camino se tomó: `first` (el botón salió en la primera espera), `waited_more` (la ficha
+    ya había pasado del splash, con el nombre en el título o texto en la página, y se esperaron otros 60 s sin
+    recargar) o `reloaded` (seguía en el splash vacío y se recargó). Si tampoco sale, el error incluye la
+    visibilidad y el foco de la pestaña, los fotogramas por segundo, las peticiones aún abiertas y el estado leído
+    otra vez justo después de la captura.
   - `status: "unconfirmed"` significa que se pulsó enviar pero no hubo confirmación: revisa el buzón antes de reintentar.
 - **Fallos de las herramientas de navegador** (todas las de arriba): cada fallo guarda, sin activar nada, una captura
   de la parte visible y de la página entera, el HTML, la URL, la excepción con su traza, los argumentos y el paso en
