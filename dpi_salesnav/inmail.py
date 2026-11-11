@@ -59,12 +59,28 @@ _COMPOSER_TIMEOUT_MS = 15_000
 # Measured on account 2: the reload of a stuck lead page ran out at 5 s.
 _GOTO_TIMEOUT_MS = 45_000
 _THREAD_ATTACHMENT_TIMEOUT = 60.0
+# How long the reloaded lead page gets to list the message just sent.
+_VERIFY_TIMEOUT = 30.0
 INMAIL_TOOL_TIMEOUT = 360.0
 _LEAD_URL = re.compile(r"^/sales/lead/[^/]+,[^/]+,[^/]+/?$")
 
 
 def _normalized(text: str) -> str:
     return " ".join(text.split())
+
+
+# The conversation history in the open dialog, without the compose form (and
+# so without what is being typed).
+_THREAD_TEXT = """(root, form) => {
+    const clone = root.cloneNode(true);
+    clone.querySelectorAll(form + ', input, textarea, script, style')
+        .forEach(e => e.remove());
+    return clone.textContent || '';
+}"""
+
+
+async def _thread_text(page: Any) -> str:
+    return _normalized(await page.locator(DIALOG).first.evaluate(_THREAD_TEXT, FORM))
 
 
 class SendRefused(Exception):
@@ -398,6 +414,68 @@ async def _remove_attachments(page: Any, names: list[str]) -> list[str]:
     return left
 
 
+async def _verify_after_reload(
+    page: Any,
+    lead_url: str,
+    body: str,
+    subject: str | None,
+    names: list[str],
+    sent_before: int,
+) -> dict[str, Any]:
+    """Whether the lead's thread, loaded again, holds the message just sent.
+
+    Never raises: send was clicked, so a failure here can only make the
+    outcome unknown, never a reason to send again.
+    """
+    out: dict[str, Any] = {"verified": False, "text": False}
+    loop = asyncio.get_running_loop()
+    want = _normalized(body)
+    opened = False
+    try:
+        await page.goto(
+            lead_url, wait_until="domcontentloaded", timeout=_GOTO_TIMEOUT_MS
+        )
+        opener = page.locator(OPEN_COMPOSER).first
+        await opener.wait_for(state="visible", timeout=_OPENER_TIMEOUT_MS)
+        await opener.click()
+        opened = True
+        await page.locator(DIALOG).first.wait_for(
+            state="visible", timeout=_COMPOSER_TIMEOUT_MS
+        )
+        deadline = loop.time() + _VERIFY_TIMEOUT
+        while True:
+            thread = await _thread_text(page)
+            copies = thread.count(want)
+            out["text"] = copies > sent_before
+            if names:
+                out["attachments"] = (
+                    await _names_present(page, names, scope=DIALOG, exclude=FORM)
+                )["found"]
+            if out["text"] and len(out.get("attachments") or []) == len(names):
+                out["verified"] = True
+                break
+            if loop.time() >= deadline:
+                break
+            await asyncio.sleep(1.0)
+        out["copies"] = copies
+        out["copies_before"] = sent_before
+        # Reported, not required: whether the thread shows the InMail subject
+        # has not been measured on a real send.
+        if subject:
+            out["subject"] = _normalized(subject) in thread
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {str(e)[:300]}"
+    finally:
+        if opened:
+            try:
+                await page.locator(CLOSE).first.click(timeout=5_000)
+            except Exception:
+                logger.debug("Could not close the verification dialog", exc_info=True)
+    if not out["verified"]:
+        logger.warning("Sent message not found after reloading %s: %s", lead_url, out)
+    return out
+
+
 async def _human_pause(low: float = 0.8, high: float = 2.0) -> None:
     await asyncio.sleep(random.uniform(low, high))
 
@@ -586,7 +664,11 @@ async def send_inmail(
                 f"(InMail credits reported: {result['inmail_credits']})."
             )
 
+        # The same text may already be in this lead's thread (a message sent
+        # before); only a copy beyond those counts as this one.
+        sent_before = (await _thread_text(page)).count(_normalized(body))
         recorder.records.clear()
+        recorder.posts.clear()
         pending["open"] = False
         failures.step("send")
         await send.click()
@@ -594,53 +676,64 @@ async def send_inmail(
         deadline = (
             loop.time() + _SEND_TIMEOUT + (_THREAD_ATTACHMENT_TIMEOUT if names else 0)
         )
-        posts: list[dict[str, Any]] = []
         in_thread: list[str] = []
         text_seen = False
-        while loop.time() < deadline:
-            await recorder.drain()
-            _raise_if_throttled()
-            posts = [r for r in recorder.records if r["method"] == "POST"]
-            cleared = (await page.locator(BODY).input_value()) == ""
-            # The thread in the open conversation shows the message once Sales
-            # Navigator has accepted it; a cleared box alone is not proof.
-            thread = await page.locator(DIALOG).first.inner_text()
-            text_seen = cleared and _normalized(body) in _normalized(thread)
-            if names:
-                in_thread = (
-                    await _names_present(page, names, scope=DIALOG, exclude=FORM)
-                )["found"]
-            if text_seen and len(in_thread) == len(names):
-                break
-            await asyncio.sleep(0.5)
-        else:
-            missing = sorted(set(names) - set(in_thread))
-            result.update(
-                status="unconfirmed",
-                text_in_thread=text_seen,
-                attachments_in_thread=in_thread,
-                post_responses=[
-                    {"status": r["status"], "path": urlparse(r["url"]).path}
-                    for r in posts
-                ],
-                message=(
-                    "Send was clicked but Sales Navigator did not confirm "
-                    + (
-                        f"the attachments {missing}"
-                        if text_seen and missing
-                        else "the message"
-                    )
-                    + ". Check the Sales Navigator inbox before retrying."
-                ),
-            )
-            return result
-
+        try:
+            while loop.time() < deadline:
+                await recorder.drain()
+                _raise_if_throttled()
+                cleared = (await page.locator(BODY).input_value()) == ""
+                # What the page itself shows after the click; recorded, and
+                # a reason to stop waiting, but not proof (see below).
+                thread = await page.locator(DIALOG).first.inner_text()
+                text_seen = cleared and _normalized(body) in _normalized(thread)
+                if names:
+                    in_thread = (
+                        await _names_present(page, names, scope=DIALOG, exclude=FORM)
+                    )["found"]
+                if text_seen and len(in_thread) == len(names):
+                    break
+                await asyncio.sleep(0.5)
+        except RateLimitError:
+            raise
+        except Exception:
+            # Send was clicked: a page that stops answering now leaves the
+            # outcome to the reload below, not to a retry.
+            logger.warning("The composer stopped answering after send", exc_info=True)
+        await recorder.drain()
+        # What the open composer shows is drawn by the page and is no proof:
+        # measured on account 2, three messages showed in it, file included,
+        # and never reached LinkedIn (no thread in the inbox, no credit spent).
+        # Only the lead's thread as LinkedIn serves it again counts.
+        failures.step("verify_after_reload")
+        verified = await _verify_after_reload(
+            page, lead_url, body, typed_subject, names, sent_before
+        )
+        # Every POST answered since the click, the reload's included: the
+        # send's own request is among them, whichever host it went to.
         result.update(
-            status="sent",
+            text_in_thread=text_seen,
             attachments_in_thread=in_thread,
-            post_responses=[
-                {"status": r["status"], "path": urlparse(r["url"]).path} for r in posts
-            ],
+            post_responses=list(recorder.posts),
+            verified_after_reload=verified,
+        )
+        if verified["verified"]:
+            result["status"] = "sent"
+            return result
+        missing = sorted(set(names) - set(verified.get("attachments") or []))
+        result.update(
+            status="unconfirmed",
+            message=(
+                "Send was clicked but the message is not in this lead's thread "
+                "after reloading the page"
+                + (
+                    f" (attachments missing: {missing})"
+                    if verified.get("text") and missing
+                    else ""
+                )
+                + ". Do not retry: check the Sales Navigator inbox and the "
+                "InMail credits first."
+            ),
         )
         return result
     except BaseException as exc:

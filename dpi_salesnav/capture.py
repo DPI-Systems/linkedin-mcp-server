@@ -37,6 +37,8 @@ class SalesApiRecorder:
         # Every response the page gets, any host, for diagnosing a load that
         # never brought the data (host + path + status only).
         self.seen: list[str] = []
+        # Every POST answered, any host: which request a send really was.
+        self.posts: list[dict[str, Any]] = []
         # Set when LinkedIn starts a human-verification check on this page.
         self.challenge: str | None = None
         # Requests the context started and has not finished, for a load that
@@ -91,6 +93,17 @@ class SalesApiRecorder:
         parsed = urlparse(response.url)
         if len(self.seen) < 400:
             self.seen.append(f"{parsed.netloc}{parsed.path[:80]}={response.status}")
+        try:
+            method = response.request.method
+        except Exception:
+            method = None
+        if method == "POST" and len(self.posts) < 50:
+            self.posts.append(
+                {
+                    "status": response.status,
+                    "url": f"{parsed.netloc}{parsed.path[:120]}",
+                }
+            )
         if any(marker in parsed.path for marker in CHALLENGE_MARKERS):
             self.challenge = parsed.path
         if not is_sales_api_response(response.url) or not self._ours(response):

@@ -293,8 +293,11 @@ def register_salesnav_tools(
             reported them, and attachments [{name, bytes, source}]. A sent
             message with files also returns attachments_in_thread, the names
             the conversation shows.
-            "unconfirmed" means send was clicked but not confirmed: check the
-            Sales Navigator inbox and do not retry blindly.
+            "sent" means the lead page, loaded again after sending, lists the
+            message in the lead's thread (verified_after_reload says what it
+            found). "unconfirmed" means send was clicked but that thread does
+            not show it: check the Sales Navigator inbox and the InMail
+            credits, and do not retry blindly.
         """
         url = validate_lead_url(lead_url)
         with tempfile.TemporaryDirectory(prefix="inmail-") as workdir:
