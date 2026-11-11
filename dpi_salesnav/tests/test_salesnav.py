@@ -246,3 +246,15 @@ def test_hip_challenge_is_reported_not_retried():
     recorder._handle_response(response)
     with pytest.raises(ChallengeShown):
         _raise_if_challenged(recorder)
+
+
+def test_a_lead_page_counts_as_past_its_splash_by_title_or_text():
+    from dpi_salesnav.inmail import _half_rendered
+
+    splash = {"title": "Sales Navigator", "body_chars": 0}
+    assert not _half_rendered(splash)
+    assert not _half_rendered({**splash, "after_screenshot": splash})
+    assert _half_rendered({"title": "Ana Ejemplo | Sales Navigator", "body_chars": 0})
+    assert _half_rendered({**splash, "body_chars": 286})
+    assert _half_rendered({**splash, "after_screenshot": {"body_chars": 12}})
+    assert not _half_rendered({"error": "TimeoutError()"})
