@@ -150,6 +150,8 @@ async def test_dry_run_attaches_verifies_then_removes_and_closes(composer, dossi
     assert result["status"] == "preview"
     assert result["attachments_verified"] is True
     assert result["attachments_removed"] == [NAME]
+    assert result["lead_load_attempts"] == 1
+    assert 0 <= result["lead_load_seconds"] < 1.5
     assert result["attachments"] == [
         {"name": NAME, "bytes": dossier.size, "source": "t"}
     ]
@@ -219,6 +221,7 @@ async def test_a_lead_page_without_its_button_is_loaded_once_more(composer, doss
     )
     assert result["status"] == "preview"
     assert len(loads) == 2
+    assert result["lead_load_attempts"] == 2
 
 
 async def test_a_lead_page_that_never_shows_its_button_is_refused(composer, dossier):

@@ -50,7 +50,9 @@ _SEND_TIMEOUT = 15.0
 # An 8 MB PDF over a home uplink; the thread may also take a while to list it.
 _UPLOAD_TIMEOUT = 120.0
 _REMOVE_TIMEOUT = 15.0
-_OPENER_TIMEOUT_MS = 20_000
+# Measured on account 2: a lead page that finished loading a few seconds
+# after 20 s, with its message button there, and no Sales API error.
+_OPENER_TIMEOUT_MS = 60_000
 _COMPOSER_TIMEOUT_MS = 15_000
 _THREAD_ATTACHMENT_TIMEOUT = 60.0
 INMAIL_TOOL_TIMEOUT = 360.0
@@ -347,12 +349,18 @@ async def send_inmail(
         # Measured on account 2: a lead page loaded seconds after another
         # composer call sometimes renders without its message button, and the
         # next load is fine. Nothing is typed yet, so one more load is safe.
+        loop = asyncio.get_running_loop()
+        load_seconds = 0.0
+        attempts = 0
         for attempt in range(2):
+            attempts = attempt + 1
             failures.step("load_lead_page")
+            started = loop.time()
             await page.goto(lead_url, wait_until="domcontentloaded")
             failures.step("find_message_button")
             try:
                 await opener.wait_for(state="visible", timeout=_OPENER_TIMEOUT_MS)
+                load_seconds = round(loop.time() - started, 1)
                 break
             except Exception as e:
                 _raise_if_throttled()
@@ -423,6 +431,9 @@ async def send_inmail(
             "body_chars": len(typed_body),
             "inmail_credits": _credits(recorder),
             "attachments": [a.describe() for a in attachments],
+            # From goto to a visible message button, on the load that showed it.
+            "lead_load_seconds": load_seconds,
+            "lead_load_attempts": attempts,
         }
 
         if not confirm_send:
@@ -456,7 +467,6 @@ async def send_inmail(
         failures.step("send")
         await send.click()
         failures.step("confirm_in_thread")
-        loop = asyncio.get_running_loop()
         deadline = (
             loop.time() + _SEND_TIMEOUT + (_THREAD_ATTACHMENT_TIMEOUT if names else 0)
         )

@@ -55,6 +55,8 @@ owner se crea con el entrypoint de upstream y no tendrá las herramientas de Sal
     disco de quien llama. Si un adjunto no se puede subir y verificar, no se envía nada y el formulario se vacía.
   - El adjunto se pasa al `input[type=file]` del formulario y se reconoce por su nombre de fichero (en el texto o en
     cualquier atributo), que no se traduce. Dos ficheros con el mismo nombre se rechazan.
+  - `lead_load_seconds` son los segundos desde abrir la ficha del lead hasta ver su botón de mensaje (se espera hasta
+    60 s), y `lead_load_attempts` vale 2 si hizo falta recargarla.
   - `status: "unconfirmed"` significa que se pulsó enviar pero no hubo confirmación: revisa el buzón antes de reintentar.
 - **Fallos de las herramientas de navegador** (todas las de arriba): cada fallo guarda, sin activar nada, una captura
   de la parte visible y de la página entera, el HTML, la URL, la excepción con su traza, los argumentos y el paso en
