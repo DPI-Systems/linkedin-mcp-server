@@ -25,7 +25,7 @@ from urllib.parse import urlparse
 from linkedin_mcp_server.core.exceptions import RateLimitError
 from linkedin_mcp_server.core.throttle import throttle_evidence, throttled_count
 
-from dpi_salesnav import failures
+from dpi_salesnav import failures, page_health
 from dpi_salesnav.attachments import Attachment
 from dpi_salesnav.capture import SalesApiRecorder
 
@@ -55,6 +55,9 @@ _REMOVE_TIMEOUT = 15.0
 # after 20 s, with its message button there, and no Sales API error.
 _OPENER_TIMEOUT_MS = 60_000
 _COMPOSER_TIMEOUT_MS = 15_000
+# The server's default of 5 s is for reading a page that is already there.
+# Measured on account 2: the reload of a stuck lead page ran out at 5 s.
+_GOTO_TIMEOUT_MS = 45_000
 _THREAD_ATTACHMENT_TIMEOUT = 60.0
 INMAIL_TOOL_TIMEOUT = 360.0
 _LEAD_URL = re.compile(r"^/sales/lead/[^/]+,[^/]+,[^/]+/?$")
@@ -280,6 +283,7 @@ async def _describe_lead_page(
         state = {"error": repr(e)[:200]}
     if recorder is not None:
         state["pending_requests"] = recorder.pending_requests()
+    state["longtasks"] = await _long_tasks(page)
     try:
         shot = pathlib.Path(tempfile.gettempdir()) / "inmail-no-button.png"
         started = time.monotonic()
@@ -296,6 +300,15 @@ async def _describe_lead_page(
         state["after_screenshot"] = {"error": repr(e)[:200]}
     logger.warning("Lead page without a message button: %s", state)
     return state
+
+
+async def _long_tasks(page: Any) -> Any:
+    try:
+        return await asyncio.wait_for(
+            page.evaluate(page_health.LONG_TASKS), _STATE_TIMEOUT
+        )
+    except Exception as e:
+        return {"error": repr(e)[:200]}
 
 
 def _half_rendered(state: dict[str, Any]) -> bool:
@@ -417,12 +430,18 @@ async def send_inmail(
         path = "first"
         failures.step("load_lead_page")
         started = loop.time()
-        await page.goto(lead_url, wait_until="domcontentloaded")
+        await page.goto(
+            lead_url, wait_until="domcontentloaded", timeout=_GOTO_TIMEOUT_MS
+        )
         for attempt in range(2):
             failures.step("find_message_button")
+            cpu_before, waited_from = page_health.renderer_cpu(), loop.time()
             try:
                 await opener.wait_for(state="visible", timeout=_OPENER_TIMEOUT_MS)
                 load_seconds = round(loop.time() - started, 1)
+                renderer_cpu = page_health.cpu_since(
+                    cpu_before, loop.time() - waited_from
+                )
                 break
             except Exception as e:
                 _raise_if_throttled()
@@ -432,7 +451,11 @@ async def send_inmail(
                     for r in recorder.records
                     if r["status"] >= 400
                 ]
+                renderer_cpu = page_health.cpu_since(
+                    cpu_before, loop.time() - waited_from
+                )
                 state = await _describe_lead_page(page, recorder)
+                state["renderer_cpu"] = renderer_cpu
                 if attempt == 1:
                     raise SendRefused(
                         "This lead page has no Sales Navigator message button, "
@@ -449,18 +472,34 @@ async def send_inmail(
                         refused,
                     )
                     continue
-                path = "reloaded"
+                stuck = "error" in state and "error" in (
+                    state.get("after_screenshot") or {}
+                )
+                path = "new_page" if stuck else "reloaded"
                 logger.warning(
-                    "No message button on %s, still on the splash "
-                    "(sales-api errors %s); reloading",
+                    "No message button on %s, %s (sales-api errors %s); %s",
                     lead_url,
+                    "page not answering" if stuck else "still on the splash",
                     refused,
+                    "loading it in a new page" if stuck else "reloading",
                 )
                 await _human_pause(5.0, 9.0)
                 failures.step("load_lead_page")
+                if stuck:
+                    # A stuck renderer will not let go of its document, so a
+                    # navigation from it times out (measured on account 2).
+                    recorder.remove()
+                    page = await page_health.replace_page(page)
+                    failures.use_page(page)
+                    recorder = SalesApiRecorder(page)
+                    recorder.install()
+                    opener = page.locator(OPEN_COMPOSER).first
                 attempts = 2
                 started = loop.time()
-                await page.goto(lead_url, wait_until="domcontentloaded")
+                await page.goto(
+                    lead_url, wait_until="domcontentloaded", timeout=_GOTO_TIMEOUT_MS
+                )
+        long_tasks = await _long_tasks(page)
         await _human_pause()
         failures.step("open_composer")
         await opener.click()
@@ -512,8 +551,13 @@ async def send_inmail(
             "lead_load_seconds": load_seconds,
             "lead_load_attempts": attempts,
             # first: shown within one wait; waited_more: a second wait on the
-            # same page; reloaded: the page was loaded again.
+            # same page; reloaded: the page was loaded again; new_page: it
+            # stopped answering and was loaded in a fresh page instead.
             "lead_load_path": path,
+            # During the wait that showed the button: CPU of the renderer
+            # processes, and the page's longest tasks since it loaded.
+            "lead_load_renderer_cpu": renderer_cpu,
+            "lead_load_longtasks": long_tasks,
         }
 
         if not confirm_send:

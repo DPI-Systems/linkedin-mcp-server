@@ -348,3 +348,57 @@ async def test_a_refused_attachment_is_captured_before_the_composer_is_emptied(
     [run] = list((tmp_path / "f").iterdir())
     assert 'class="pill"' in (run / "page.html").read_text()
     assert (await _state(page))["pills"] == 0
+
+
+async def test_the_result_names_the_lead_pages_long_tasks(composer, dossier):
+    page, serve = composer
+    busy = (
+        "setTimeout(() => { const t = performance.now();"
+        " while (performance.now() - t < 300) {} }, 20)"
+    )
+    await serve({}, PAGE.replace("<script>", f"<script>{busy};", 1))
+    result = await inmail.send_inmail(
+        page, LEAD, "Asunto", "Hola", confirm_send=False, attachments=[dossier]
+    )
+    tasks = result["lead_load_longtasks"]
+    assert tasks["count"] >= 1
+    assert tasks["longest"][0]["duration_ms"] >= 290
+    assert tasks["frames"][0]["duration_ms"] >= 290
+    assert tasks["visibility"][0]["state"] == "visible"
+    assert "renderer_cpu" not in result
+    assert "lead_load_renderer_cpu" in result
+
+
+async def test_a_lead_page_that_stops_answering_is_loaded_in_a_new_page(
+    composer, dossier, monkeypatch
+):
+    first, _ = composer
+    browser = first.context.browser
+    assert browser is not None
+    # A context of its own: the fixture's page cannot open a second page.
+    page = await (await browser.new_context()).new_page()
+    monkeypatch.setattr(inmail, "_STATE_TIMEOUT", 0.5)
+    page.set_default_timeout(1000)
+    # Loaded, then busy for longer than the wait and every read of its state.
+    hung = SPLASH.replace(
+        "<body></body>",
+        "<body><script>setTimeout(() => { const t = Date.now();"
+        " while (Date.now() - t < 8000) {} }, 200)</script></body>",
+    )
+    loads = []
+
+    async def handler(route):
+        loads.append(route.request.url)
+        await route.fulfill(
+            content_type="text/html", body=hung if len(loads) == 1 else PAGE
+        )
+
+    await page.context.add_init_script("window.cfg = {};")
+    await page.context.route("https://www.linkedin.com/**", handler)
+    result = await inmail.send_inmail(
+        page, LEAD, "Asunto", "Hola", confirm_send=False, attachments=[dossier]
+    )
+    assert result["status"] == "preview"
+    assert result["lead_load_path"] == "new_page"
+    assert len(loads) == 2
+    assert page.is_closed()
