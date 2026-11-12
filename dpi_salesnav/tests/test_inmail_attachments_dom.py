@@ -467,7 +467,7 @@ async def test_a_lead_page_that_stops_answering_is_loaded_in_a_new_page(
     hung = SPLASH.replace(
         "<body></body>",
         "<body><script>setTimeout(() => { const t = Date.now();"
-        " while (Date.now() - t < 8000) {} }, 200)</script></body>",
+        " while (Date.now() - t < 15000) {} }, 200)</script></body>",
     )
     loads = []
 
