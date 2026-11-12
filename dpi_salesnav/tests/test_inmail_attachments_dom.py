@@ -10,6 +10,7 @@ translated text), not about Sales Navigator's layout.
 """
 
 import asyncio
+import json
 import pathlib
 
 import pytest
@@ -71,14 +72,22 @@ PAGE = """
   function send() {
     const li = document.createElement('li');
     li.textContent = $('textarea').value;
+    const files = [];
     if (window.cfg.thread_shows_file) {
       for (const p of document.querySelectorAll('#files .pill')) {
         const a = document.createElement('a');
         a.textContent = p.querySelector('.n').textContent;
+        files.push(a.textContent);
         li.appendChild(a);
       }
     }
+    // Drawn at once, as Sales Navigator does; the server may still refuse it.
     $('#thread').appendChild(li);
+    fetch('https://www.linkedin.com/sales-api/messages', {
+      method: 'POST', body: JSON.stringify({
+        subject: $('#compose-form-subject-1').value, body: li.firstChild.textContent, files,
+      }),
+    });
     $('textarea').value = '';
     $('#files').innerHTML = '';
   }
@@ -103,6 +112,7 @@ def fast(monkeypatch):
     monkeypatch.setattr(inmail, "_REMOVE_TIMEOUT", 2.0)
     monkeypatch.setattr(inmail, "_SEND_TIMEOUT", 2.0)
     monkeypatch.setattr(inmail, "_THREAD_ATTACHMENT_TIMEOUT", 0.0)
+    monkeypatch.setattr(inmail, "_VERIFY_TIMEOUT", 1.0)
     monkeypatch.setattr(inmail, "_OPENER_TIMEOUT_MS", 1_500)
 
 
@@ -115,11 +125,37 @@ async def composer():
         except Exception as exc:  # browser binary missing
             pytest.skip(f"chromium unavailable: {exc}")
 
-        async def serve(cfg: dict, html: str = PAGE) -> None:
-            await page.add_init_script(f"window.cfg = {__import__('json').dumps(cfg)};")
+        async def serve(cfg: dict, html: str = PAGE, thread: list | None = None):
+            await page.add_init_script(f"window.cfg = {json.dumps(cfg)};")
+            # What the server has accepted, served again with every load.
+            stored = thread if thread is not None else []
 
             async def handler(route):
-                await route.fulfill(content_type="text/html", body=html)
+                request = route.request
+                if request.method == "POST":
+                    await asyncio.sleep(cfg.get("post_delay", 0))
+                    if cfg.get("server_drops"):
+                        await route.fulfill(status=500, body="{}")
+                        return
+                    stored.append(json.loads(request.post_data or "{}"))
+                    await route.fulfill(content_type="application/json", body="{}")
+                    return
+                items = "".join(
+                    "<li>{}{}{}</li>".format(
+                        ""
+                        if cfg.get("thread_hides_subject")
+                        else f"<b>{m.get('subject', '')}</b> ",
+                        m["body"],
+                        "".join(f"<a>{f}</a>" for f in m["files"]),
+                    )
+                    for m in stored
+                )
+                await route.fulfill(
+                    content_type="text/html",
+                    body=html.replace(
+                        '<ul id="thread"></ul>', f'<ul id="thread">{items}</ul>'
+                    ),
+                )
 
             await page.route("https://www.linkedin.com/**", handler)
 
@@ -192,6 +228,54 @@ async def test_sent_needs_the_file_name_in_the_thread(composer, dossier):
     )
     assert result["status"] == "sent"
     assert result["attachments_in_thread"] == [NAME]
+    assert result["verified_after_reload"]["verified"] is True
+    assert {"status": 200, "url": "www.linkedin.com/sales-api/messages"} in result[
+        "post_responses"
+    ]
+
+
+async def test_a_message_drawn_but_refused_by_the_server_is_unconfirmed(
+    composer, dossier
+):
+    page, serve = composer
+    await serve({"thread_shows_file": True, "server_drops": True})
+    result = await inmail.send_inmail(
+        page, LEAD, "Asunto", "Hola", confirm_send=True, attachments=[dossier]
+    )
+    # The composer showed text and file, as on account 2.
+    assert result["text_in_thread"] is True
+    assert result["attachments_in_thread"] == [NAME]
+    assert result["status"] == "unconfirmed"
+    assert result["verified_after_reload"]["verified"] is False
+    assert {"status": 500, "url": "www.linkedin.com/sales-api/messages"} in result[
+        "post_responses"
+    ]
+
+
+async def test_a_slow_send_request_is_not_cancelled_by_the_reload(composer):
+    page, serve = composer
+    # Drawn at once, accepted 1.5 s later: a reload before that cancels it.
+    await serve({"post_delay": 1.5})
+    result = await inmail.send_inmail(page, LEAD, "Asunto", "Hola", confirm_send=True)
+    assert result["status"] == "sent"
+    assert result["verified_after_reload"]["copies"] == 1
+
+
+async def test_a_thread_without_the_inmails_subject_is_unconfirmed(composer):
+    page, serve = composer
+    await serve({"thread_hides_subject": True})
+    result = await inmail.send_inmail(page, LEAD, "Asunto", "Hola", confirm_send=True)
+    assert result["verified_after_reload"]["text"] is True
+    assert result["verified_after_reload"]["subject"] is False
+    assert result["status"] == "unconfirmed"
+
+
+async def test_an_earlier_copy_of_the_text_does_not_confirm_a_new_send(composer):
+    page, serve = composer
+    await serve({"server_drops": True}, thread=[{"body": "Hola", "files": []}])
+    result = await inmail.send_inmail(page, LEAD, "Asunto", "Hola", confirm_send=True)
+    assert result["status"] == "unconfirmed"
+    assert result["verified_after_reload"]["copies_before"] == 1
 
 
 async def test_a_thread_without_the_file_is_unconfirmed(composer, dossier):
@@ -383,7 +467,7 @@ async def test_a_lead_page_that_stops_answering_is_loaded_in_a_new_page(
     hung = SPLASH.replace(
         "<body></body>",
         "<body><script>setTimeout(() => { const t = Date.now();"
-        " while (Date.now() - t < 8000) {} }, 200)</script></body>",
+        " while (Date.now() - t < 15000) {} }, 200)</script></body>",
     )
     loads = []
 

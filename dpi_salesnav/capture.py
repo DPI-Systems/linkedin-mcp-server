@@ -37,11 +37,15 @@ class SalesApiRecorder:
         # Every response the page gets, any host, for diagnosing a load that
         # never brought the data (host + path + status only).
         self.seen: list[str] = []
+        # Every POST answered, any host: which request a send really was.
+        self.posts: list[dict[str, Any]] = []
         # Set when LinkedIn starts a human-verification check on this page.
         self.challenge: str | None = None
         # Requests the context started and has not finished, for a load that
         # stays on the splash: what it is still waiting for.
         self._inflight: dict[int, tuple[str, str, float]] = {}
+        # When each open POST started, to wait for a send's own request.
+        self._open_posts: dict[int, float] = {}
 
     # On the browser context, not the page: Sales Navigator can fetch its data
     # through a service worker, and those responses are only reported there.
@@ -66,6 +70,8 @@ class SalesApiRecorder:
                 logger.debug("Failed to remove %s listener", event, exc_info=True)
 
     def _request_started(self, request: Any) -> None:
+        if getattr(request, "method", None) == "POST":
+            self._open_posts[id(request)] = time.monotonic()
         if len(self._inflight) >= 400:
             return
         parsed = urlparse(request.url)
@@ -77,6 +83,11 @@ class SalesApiRecorder:
 
     def _request_ended(self, request: Any) -> None:
         self._inflight.pop(id(request), None)
+        self._open_posts.pop(id(request), None)
+
+    def open_posts_since(self, started: float) -> int:
+        """POSTs started at or after *started* (time.monotonic) still open."""
+        return sum(1 for t in self._open_posts.values() if t >= started)
 
     def pending_requests(self, limit: int = 15) -> list[dict[str, Any]]:
         """The oldest requests still open, host and path only."""
@@ -91,6 +102,17 @@ class SalesApiRecorder:
         parsed = urlparse(response.url)
         if len(self.seen) < 400:
             self.seen.append(f"{parsed.netloc}{parsed.path[:80]}={response.status}")
+        try:
+            method = response.request.method
+        except Exception:
+            method = None
+        if method == "POST" and len(self.posts) < 50:
+            self.posts.append(
+                {
+                    "status": response.status,
+                    "url": f"{parsed.netloc}{parsed.path[:120]}",
+                }
+            )
         if any(marker in parsed.path for marker in CHALLENGE_MARKERS):
             self.challenge = parsed.path
         if not is_sales_api_response(response.url) or not self._ours(response):
