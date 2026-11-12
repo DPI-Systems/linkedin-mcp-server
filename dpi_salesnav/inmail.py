@@ -451,7 +451,15 @@ async def _verify_after_reload(
                 out["attachments"] = (
                     await _names_present(page, names, scope=DIALOG, exclude=FORM)
                 )["found"]
-            if out["text"] and len(out.get("attachments") or []) == len(names):
+            # The subject, when the composer had one: measured on account 2,
+            # the reloaded thread shows an InMail's subject.
+            if subject:
+                out["subject"] = _normalized(subject) in thread
+            if (
+                out["text"]
+                and out.get("subject", True)
+                and len(out.get("attachments") or []) == len(names)
+            ):
                 out["verified"] = True
                 break
             if loop.time() >= deadline:
@@ -459,10 +467,6 @@ async def _verify_after_reload(
             await asyncio.sleep(1.0)
         out["copies"] = copies
         out["copies_before"] = sent_before
-        # Reported, not required: whether the thread shows the InMail subject
-        # has not been measured on a real send.
-        if subject:
-            out["subject"] = _normalized(subject) in thread
     except Exception as e:
         out["error"] = f"{type(e).__name__}: {str(e)[:300]}"
     finally:

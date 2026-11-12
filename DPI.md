@@ -70,7 +70,7 @@ owner se crea con el entrypoint de upstream y no tendrá las herramientas de Sal
     más largos con el script responsable y sus cambios de visibilidad. Los mismos datos van en el estado de un fallo.
   - `status: "unconfirmed"` significa que se pulsó enviar pero no hubo confirmación: revisa el buzón antes de reintentar.
   - `"sent"` exige que, tras enviar, la ficha recargada muestre el mensaje en el hilo de esa lead (el texto, una copia
-    más de las que ya había, y cada adjunto). Lo que pinta el compositor no basta: en la cuenta 2, tres mensajes se
+    más de las que ya había; el asunto, si el compositor tenía campo de asunto; y cada adjunto). Lo que pinta el compositor no basta: en la cuenta 2, tres mensajes se
     vieron en él con su PDF y nunca llegaron a LinkedIn. `verified_after_reload` dice qué se encontró, y
     `post_responses` lista todos los POST respondidos desde el clic, de cualquier host.
 - **Fallos de las herramientas de navegador** (todas las de arriba): cada fallo guarda, sin activar nada, una captura

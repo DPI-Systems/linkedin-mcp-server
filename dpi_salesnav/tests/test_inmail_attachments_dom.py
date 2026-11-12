@@ -84,7 +84,9 @@ PAGE = """
     // Drawn at once, as Sales Navigator does; the server may still refuse it.
     $('#thread').appendChild(li);
     fetch('https://www.linkedin.com/sales-api/messages', {
-      method: 'POST', body: JSON.stringify({body: li.firstChild.textContent, files}),
+      method: 'POST', body: JSON.stringify({
+        subject: $('#compose-form-subject-1').value, body: li.firstChild.textContent, files,
+      }),
     });
     $('textarea').value = '';
     $('#files').innerHTML = '';
@@ -138,8 +140,12 @@ async def composer():
                     await route.fulfill(content_type="application/json", body="{}")
                     return
                 items = "".join(
-                    "<li>{}{}</li>".format(
-                        m["body"], "".join(f"<a>{f}</a>" for f in m["files"])
+                    "<li>{}{}{}</li>".format(
+                        ""
+                        if cfg.get("thread_hides_subject")
+                        else f"<b>{m.get('subject', '')}</b> ",
+                        m["body"],
+                        "".join(f"<a>{f}</a>" for f in m["files"]),
                     )
                     for m in stored
                 )
@@ -243,6 +249,15 @@ async def test_a_message_drawn_but_refused_by_the_server_is_unconfirmed(
     assert {"status": 500, "url": "www.linkedin.com/sales-api/messages"} in result[
         "post_responses"
     ]
+
+
+async def test_a_thread_without_the_inmails_subject_is_unconfirmed(composer):
+    page, serve = composer
+    await serve({"thread_hides_subject": True})
+    result = await inmail.send_inmail(page, LEAD, "Asunto", "Hola", confirm_send=True)
+    assert result["verified_after_reload"]["text"] is True
+    assert result["verified_after_reload"]["subject"] is False
+    assert result["status"] == "unconfirmed"
 
 
 async def test_an_earlier_copy_of_the_text_does_not_confirm_a_new_send(composer):
