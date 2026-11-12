@@ -59,6 +59,10 @@ _COMPOSER_TIMEOUT_MS = 15_000
 # Measured on account 2: the reload of a stuck lead page ran out at 5 s.
 _GOTO_TIMEOUT_MS = 45_000
 _THREAD_ATTACHMENT_TIMEOUT = 60.0
+# Before reloading after send: at least this long, and until the POSTs the
+# click started are answered, up to the second figure.
+_POST_SETTLE = 2.0
+_POST_TIMEOUT = 30.0
 # How long the reloaded lead page gets to list the message just sent.
 _VERIFY_TIMEOUT = 30.0
 INMAIL_TOOL_TIMEOUT = 360.0
@@ -675,6 +679,7 @@ async def send_inmail(
         recorder.posts.clear()
         pending["open"] = False
         failures.step("send")
+        clicked_at = time.monotonic()
         await send.click()
         failures.step("confirm_in_thread")
         deadline = (
@@ -709,6 +714,24 @@ async def send_inmail(
         # measured on account 2, three messages showed in it, file included,
         # and never reached LinkedIn (no thread in the inbox, no credit spent).
         # Only the lead's thread as LinkedIn serves it again counts.
+        # The page draws the message before its request is answered, so a
+        # reload right away could cancel the send itself. Wait for the POSTs
+        # the click started, and give one at least the time to start.
+        failures.step("wait_for_send_request")
+        settle = loop.time() + _POST_SETTLE
+        post_deadline = loop.time() + _POST_TIMEOUT
+        while loop.time() < post_deadline:
+            open_posts = recorder.open_posts_since(clicked_at)
+            if open_posts == 0 and loop.time() >= settle:
+                break
+            await asyncio.sleep(0.25)
+        else:
+            logger.warning(
+                "%d POSTs still open %ss after send; reloading anyway",
+                recorder.open_posts_since(clicked_at),
+                _POST_TIMEOUT,
+            )
+        await recorder.drain()
         failures.step("verify_after_reload")
         verified = await _verify_after_reload(
             page, lead_url, body, typed_subject, names, sent_before

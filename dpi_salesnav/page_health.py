@@ -20,6 +20,16 @@ from linkedin_mcp_server.core.throttle import watch_responses
 logger = logging.getLogger(__name__)
 
 _CLOSE_TIMEOUT = 10.0
+# For goto, reload and the waits for a load. The server's default of 5 s is
+# for reading a page that is already there; measured on dpi-lab under load,
+# Sales Navigator pages often take longer to start, on both accounts.
+NAVIGATION_TIMEOUT_MS = 45_000
+
+
+def set_timeouts(page: Any) -> None:
+    """Give a page the navigation timeout; reading keeps the server default."""
+    page.set_default_navigation_timeout(NAVIGATION_TIMEOUT_MS)
+
 
 # What the page's own performance timeline kept, read through buffered
 # observers so nothing has to be injected before the page loads: its longest
@@ -129,6 +139,7 @@ async def replace_page(old: Any) -> Any:
     context = old.context
     new = await context.new_page()
     new.set_default_timeout(get_config().browser.default_timeout)
+    set_timeouts(new)
     if manager is not None and getattr(manager, "_page", None) is old:
         new.on("crash", manager._note_page_crash)
         manager._page = new

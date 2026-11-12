@@ -34,6 +34,7 @@ from dpi_salesnav.failures import (
     with_failure_artifacts,
 )
 from dpi_salesnav.contact_info import read_contact_info
+from dpi_salesnav import page_health
 from dpi_salesnav.inbox import read_inbox, read_thread
 from dpi_salesnav.people import LeadFilters, company_people, search_companies
 from dpi_salesnav.verification import (
@@ -48,6 +49,7 @@ logger = logging.getLogger(__name__)
 async def _page(ctx: Context, tool_name: str) -> Any:
     await get_ready_extractor(ctx, tool_name=tool_name)
     page = (await get_or_create_browser()).page
+    page_health.set_timeouts(page)
     use_page(page)
     return page
 

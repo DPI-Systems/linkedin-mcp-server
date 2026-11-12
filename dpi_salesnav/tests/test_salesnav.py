@@ -270,3 +270,31 @@ def test_renderer_cpu_is_reported_busiest_first(monkeypatch):
     assert got["busiest"][1]["cpu_s"] == 0.5
     monkeypatch.setattr(page_health, "renderer_cpu", dict)
     assert page_health.cpu_since({}, 1.0) == {"available": False}
+
+
+async def test_every_salesnav_page_waits_45_s_for_a_navigation(monkeypatch):
+    from dpi_salesnav import tools
+
+    class Page:
+        navigation = None
+
+        def set_default_navigation_timeout(self, ms):
+            self.navigation = ms
+
+    page = Page()
+
+    class Browser:
+        pass
+
+    Browser.page = page
+
+    async def ready(*_a, **_k):
+        return None
+
+    async def browser():
+        return Browser()
+
+    monkeypatch.setattr(tools, "get_ready_extractor", ready)
+    monkeypatch.setattr(tools, "get_or_create_browser", browser)
+    assert await tools._page(None, "salesnav_search_companies") is page
+    assert page.navigation == 45_000

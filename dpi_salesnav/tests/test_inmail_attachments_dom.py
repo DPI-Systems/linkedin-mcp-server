@@ -133,6 +133,7 @@ async def composer():
             async def handler(route):
                 request = route.request
                 if request.method == "POST":
+                    await asyncio.sleep(cfg.get("post_delay", 0))
                     if cfg.get("server_drops"):
                         await route.fulfill(status=500, body="{}")
                         return
@@ -249,6 +250,15 @@ async def test_a_message_drawn_but_refused_by_the_server_is_unconfirmed(
     assert {"status": 500, "url": "www.linkedin.com/sales-api/messages"} in result[
         "post_responses"
     ]
+
+
+async def test_a_slow_send_request_is_not_cancelled_by_the_reload(composer):
+    page, serve = composer
+    # Drawn at once, accepted 1.5 s later: a reload before that cancels it.
+    await serve({"post_delay": 1.5})
+    result = await inmail.send_inmail(page, LEAD, "Asunto", "Hola", confirm_send=True)
+    assert result["status"] == "sent"
+    assert result["verified_after_reload"]["copies"] == 1
 
 
 async def test_a_thread_without_the_inmails_subject_is_unconfirmed(composer):
