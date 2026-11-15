@@ -44,8 +44,10 @@ class SalesApiRecorder:
         # Requests the context started and has not finished, for a load that
         # stays on the splash: what it is still waiting for.
         self._inflight: dict[int, tuple[str, str, float]] = {}
-        # When each open POST started, to wait for a send's own request.
+        # When each open POST started, to wait for a send's own request, and
+        # each open write of any method (a video goes up by PUT).
         self._open_posts: dict[int, float] = {}
+        self._open_writes: dict[int, float] = {}
 
     # On the browser context, not the page: Sales Navigator can fetch its data
     # through a service worker, and those responses are only reported there.
@@ -70,8 +72,11 @@ class SalesApiRecorder:
                 logger.debug("Failed to remove %s listener", event, exc_info=True)
 
     def _request_started(self, request: Any) -> None:
-        if getattr(request, "method", None) == "POST":
+        method = getattr(request, "method", None)
+        if method == "POST":
             self._open_posts[id(request)] = time.monotonic()
+        if method not in (None, "GET", "HEAD", "OPTIONS"):
+            self._open_writes[id(request)] = time.monotonic()
         if len(self._inflight) >= 400:
             return
         parsed = urlparse(request.url)
@@ -84,6 +89,11 @@ class SalesApiRecorder:
     def _request_ended(self, request: Any) -> None:
         self._inflight.pop(id(request), None)
         self._open_posts.pop(id(request), None)
+        self._open_writes.pop(id(request), None)
+
+    def open_writes_since(self, started: float) -> int:
+        """Write requests (POST, PUT, PATCH...) started since *started*, open."""
+        return sum(1 for t in self._open_writes.values() if t >= started)
 
     def open_posts_since(self, started: float) -> int:
         """POSTs started at or after *started* (time.monotonic) still open."""

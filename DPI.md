@@ -97,6 +97,20 @@ owner se crea con el entrypoint de upstream y no tendrá las herramientas de Sal
   titulares, listas...).
 - **`salesnav_publish_article(draft_id, commentary?, confirm_publish=false)`**: publica un borrador ya revisado.
   Sin `confirm_publish` solo dice título, autor y destino.
+- **`linkedin_create_post(text, video?, confirm_publish=false)`**: publica un post en el feed del propio perfil, con
+  texto y, si se quiere, un vídeo (MP4, MOV o M4V de hasta 500 MB; el vertical 9:16 de un Short va bien). El vídeo es
+  una URL https que descarga el servidor o un fichero dentro de `DPI_INMAIL_ATTACHMENTS_DIR`, nunca una página de
+  YouTube: hay que pasar el original o un enlace directo.
+  - Sin `confirm_publish` es una prueba en seco: abre el cuadro de publicar, escribe el texto, añade el vídeo, pasa por
+    el editor de LinkedIn, comprueba el botón de publicar y lo descarta todo sin guardar borrador. LinkedIn no sube el
+    vídeo hasta que se publica, así que la prueba no demuestra que lo acepte.
+  - Al publicar espera a que terminen todas las peticiones de escritura que empezó el clic (la subida del vídeo)
+    antes de salir de la página, y solo devuelve `published` si el post, cargado de nuevo desde su enlace o desde la
+    actividad reciente del perfil, muestra el texto y el vídeo. Si no, `unconfirmed`: revisar el perfil antes de
+    volver a publicar.
+  - Medido el 2026-11-15 en la cuenta 1 (interfaz en español): el cuadro es un `<dialog>` con el editor
+    `ShareBox_textEditor`; el botón de multimedia se reconoce porque abre un selector de ficheros, no por su texto.
+    La publicación real todavía no se ha probado en vivo.
 - **`linkedin_network_updates(categories?, max_results=30)`**: solo lectura. Lee "Ponte al día" de Mi red:
   `birthdays`, `job_changes`, `work_anniversaries` y `education` (por defecto las cuatro, una navegación cada una).
   Por persona devuelve `name`, `detail` (la línea de LinkedIn en el idioma de la cuenta: cuándo es o fue el
