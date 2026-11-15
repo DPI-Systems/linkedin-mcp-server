@@ -35,6 +35,7 @@ from dpi_salesnav.failures import (
 )
 from dpi_salesnav.contact_info import read_contact_info
 from dpi_salesnav import page_health
+from dpi_salesnav import post as post_module
 from dpi_salesnav.inbox import read_inbox, read_thread
 from dpi_salesnav.people import LeadFilters, company_people, search_companies
 from dpi_salesnav.verification import (
@@ -639,6 +640,71 @@ def register_salesnav_tools(
             (whether a viewer was open) and reason.
         """
         return await finish_verification()
+
+    @mcp.tool(
+        timeout=900,
+        title="LinkedIn: Create Post",
+        annotations={"destructiveHint": True, "openWorldHint": True},
+        tags={"post", "actions"},
+    )
+    @tool_errors
+    @with_failure_artifacts
+    async def linkedin_create_post(
+        text: Annotated[str, Field(min_length=1, max_length=post_module.TEXT_MAX)],
+        ctx: Context,
+        video: str | None = None,
+        confirm_publish: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Publish a post on the member's own feed: text, and optionally a video.
+
+        Without confirm_publish this is a dry run: it opens LinkedIn's share
+        box, types the text, adds the video and goes through LinkedIn's media
+        editor, checks the post button, then discards everything without
+        saving a draft. LinkedIn uploads a video only when the post is
+        published, so a dry run cannot prove LinkedIn accepts the file. Only
+        pass confirm_publish=true after a person has approved this exact text
+        and video.
+
+        Args:
+            text: Post text (up to 3000 characters). Hashtags are typed as
+                written; @mentions are not turned into links.
+            ctx: FastMCP context for progress reporting
+            video: One video (MP4, MOV or M4V, up to 500 MB; vertical 9:16
+                works, as for YouTube Shorts). An https URL the server
+                downloads, or a path on the server inside
+                DPI_INMAIL_ATTACHMENTS_DIR. Not a YouTube page: pass the
+                original file or a direct link to it.
+            confirm_publish: Actually publish. Default false (dry run).
+
+        Returns:
+            Dict with status ("preview", "published" or "unconfirmed"),
+            text_chars, video {name, bytes, source}, post_button_enabled and,
+            after publishing, url, upload_seconds, post_links,
+            verified_after_reload (the post loaded again: text, videos) and
+            post_responses. "unconfirmed" means post was clicked but the post
+            was not found afterwards: check the profile before posting again.
+        """
+        with tempfile.TemporaryDirectory(prefix="post-") as workdir:
+            files = await fetch_all(
+                [video] if video else [],
+                pathlib.Path(workdir),
+                max_bytes=post_module.VIDEO_MAX_BYTES,
+            )
+            if files:
+                post_module.check_video(files[0])
+            page = await _page(ctx, "linkedin_create_post")
+            logger.info(
+                "LinkedIn post (publish=%s, video=%s)",
+                confirm_publish,
+                files[0].name if files else None,
+            )
+            return await post_module.create_post(
+                page,
+                text,
+                video=files[0] if files else None,
+                confirm_publish=confirm_publish,
+            )
 
     @mcp.tool(
         timeout=tool_timeout,

@@ -104,7 +104,9 @@ async def download(
     *,
     client: httpx2.AsyncClient | None = None,
     check_host: bool = True,
+    max_bytes: int | None = None,
 ) -> Attachment:
+    max_bytes = max_bytes or MAX_BYTES
     own = client is None
     client = client or httpx2.AsyncClient(timeout=DOWNLOAD_TIMEOUT)
     try:
@@ -125,8 +127,8 @@ async def download(
                         f"Downloading {url} returned HTTP {r.status_code}."
                     )
                 declared = r.headers.get("content-length")
-                if declared and declared.isdigit() and int(declared) > MAX_BYTES:
-                    raise AttachmentError(f"{url} is larger than {MAX_BYTES} bytes.")
+                if declared and declared.isdigit() and int(declared) > max_bytes:
+                    raise AttachmentError(f"{url} is larger than {max_bytes} bytes.")
                 name = safe_name(
                     _name_from_headers(r.headers) or unquote(urlparse(current).path)
                 )
@@ -135,9 +137,9 @@ async def download(
                 with target.open("wb") as out:
                     async for chunk in r.aiter_bytes():
                         size += len(chunk)
-                        if size > MAX_BYTES:
+                        if size > max_bytes:
                             raise AttachmentError(
-                                f"{url} is larger than {MAX_BYTES} bytes."
+                                f"{url} is larger than {max_bytes} bytes."
                             )
                         out.write(chunk)
                 if size == 0:
@@ -151,8 +153,11 @@ async def download(
             await client.aclose()
 
 
-def local(path: str, root: pathlib.Path | None = None) -> Attachment:
+def local(
+    path: str, root: pathlib.Path | None = None, max_bytes: int | None = None
+) -> Attachment:
     root = root or attachments_dir()
+    max_bytes = max_bytes or MAX_BYTES
     candidate = pathlib.Path(path).expanduser()
     if not candidate.is_absolute():
         candidate = root / candidate
@@ -165,8 +170,8 @@ def local(path: str, root: pathlib.Path | None = None) -> Attachment:
     if not resolved.is_file():
         raise AttachmentError(f"No such file on the server: {resolved}.")
     size = resolved.stat().st_size
-    if size == 0 or size > MAX_BYTES:
-        raise AttachmentError(f"{resolved} must be 1 byte to {MAX_BYTES} bytes.")
+    if size == 0 or size > max_bytes:
+        raise AttachmentError(f"{resolved} must be 1 byte to {max_bytes} bytes.")
     return Attachment(
         name=safe_name(resolved.name), path=resolved, size=size, source=path
     )
@@ -178,6 +183,7 @@ async def fetch_all(
     *,
     client: httpx2.AsyncClient | None = None,
     check_host: bool = True,
+    max_bytes: int | None = None,
 ) -> list[Attachment]:
     if len(sources) > MAX_FILES:
         raise AttachmentError(f"At most {MAX_FILES} attachments per message.")
@@ -186,10 +192,16 @@ async def fetch_all(
         source = source.strip()
         if "://" in source:
             out.append(
-                await download(source, workdir, client=client, check_host=check_host)
+                await download(
+                    source,
+                    workdir,
+                    client=client,
+                    check_host=check_host,
+                    max_bytes=max_bytes,
+                )
             )
         else:
-            out.append(local(source))
+            out.append(local(source, max_bytes=max_bytes))
     names = [a.name for a in out]
     if len(set(names)) != len(names):
         raise AttachmentError(
