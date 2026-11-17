@@ -18,13 +18,14 @@ import pathlib
 import random
 import re
 import tempfile
+import time
 from typing import Any
 from urllib.parse import urlparse
 
 from linkedin_mcp_server.core.exceptions import RateLimitError
 from linkedin_mcp_server.core.throttle import throttle_evidence, throttled_count
 
-from dpi_salesnav import failures
+from dpi_salesnav import failures, page_health
 from dpi_salesnav.attachments import Attachment
 from dpi_salesnav.capture import SalesApiRecorder
 
@@ -54,6 +55,9 @@ _REMOVE_TIMEOUT = 15.0
 # after 20 s, with its message button there, and no Sales API error.
 _OPENER_TIMEOUT_MS = 60_000
 _COMPOSER_TIMEOUT_MS = 15_000
+# The server's default of 5 s is for reading a page that is already there.
+# Measured on account 2: the reload of a stuck lead page ran out at 5 s.
+_GOTO_TIMEOUT_MS = 45_000
 _THREAD_ATTACHMENT_TIMEOUT = 60.0
 INMAIL_TOOL_TIMEOUT = 360.0
 _LEAD_URL = re.compile(r"^/sales/lead/[^/]+,[^/]+,[^/]+/?$")
@@ -216,40 +220,110 @@ async def _names_present(
     return await root.evaluate(_NAMES_PRESENT, {"names": names, "exclude": exclude})
 
 
-_LEAD_PAGE_STATE = """() => ({
+_LEAD_PAGE_STATE = """async () => {
+    const shown = {
+        visibility: document.visibilityState,
+        focus: document.hasFocus(),
+        title: document.title,
+        anchors: [...document.querySelectorAll('button')]
+            .filter(b => [...b.attributes].some(a => a.name.startsWith('data-anchor')))
+            .map(b => Object.fromEntries([...b.attributes]
+                .filter(a => a.name !== 'class' && a.name !== 'style')
+                .map(a => [a.name, a.value.slice(0, 60)]))),
+        dialogs: [...document.querySelectorAll(
+            '[role=dialog], [role=alertdialog], dialog[open]')].map(d => ({
+                role: d.getAttribute('role') || d.tagName.toLowerCase(),
+                label: (d.getAttribute('aria-label') || '').slice(0, 80),
+                shown: d.checkVisibility ? d.checkVisibility() : !!d.offsetParent,
+                message_overlay: d.hasAttribute('data-message-overlay-container'),
+            })),
+        body_chars: document.body ? document.body.innerText.length : 0,
+        ready: document.readyState,
+    };
+    // Frames the page got in one second: about 60 when it is painted, few or
+    // none when the browser holds it back as a background tab.
+    let frames = 0;
+    const t0 = performance.now();
+    await new Promise(done => {
+        const tick = () => {
+            frames++;
+            if (performance.now() - t0 < 1000) requestAnimationFrame(tick);
+            else done();
+        };
+        requestAnimationFrame(tick);
+        setTimeout(done, 1500);
+    });
+    shown.raf_frames_1s = frames;
+    return shown;
+}"""
+
+# The same page read again right after the screenshot, to tell whether taking
+# one is what makes a stuck page render.
+_AFTER_SCREENSHOT = """() => ({
     title: document.title,
-    anchors: [...document.querySelectorAll('button')]
-        .filter(b => [...b.attributes].some(a => a.name.startsWith('data-anchor')))
-        .map(b => Object.fromEntries([...b.attributes]
-            .filter(a => a.name !== 'class' && a.name !== 'style')
-            .map(a => [a.name, a.value.slice(0, 60)]))),
-    dialogs: [...document.querySelectorAll(
-        '[role=dialog], [role=alertdialog], dialog[open]')].map(d => ({
-            role: d.getAttribute('role') || d.tagName.toLowerCase(),
-            label: (d.getAttribute('aria-label') || '').slice(0, 80),
-            shown: d.checkVisibility ? d.checkVisibility() : !!d.offsetParent,
-            message_overlay: d.hasAttribute('data-message-overlay-container'),
-        })),
     body_chars: document.body ? document.body.innerText.length : 0,
-    ready: document.readyState,
+    has_message_button: !!document.querySelector('button[data-anchor-send-inmail]'),
 })"""
 
+# What Sales Navigator titles its tab while the app is still on its splash.
+# A product name, not translated; a lead page that rendered is titled after
+# the person.
+_SPLASH_TITLE = "Sales Navigator"
+_STATE_TIMEOUT = 5.0
 
-async def _describe_lead_page(page: Any) -> dict[str, Any]:
+
+async def _describe_lead_page(
+    page: Any, recorder: SalesApiRecorder | None = None
+) -> dict[str, Any]:
     """What the lead page showed when its message button never appeared."""
     state: dict[str, Any] = {}
     try:
-        state = await page.evaluate(_LEAD_PAGE_STATE)
+        state = await asyncio.wait_for(page.evaluate(_LEAD_PAGE_STATE), _STATE_TIMEOUT)
     except Exception as e:
         state = {"error": repr(e)[:200]}
+    if recorder is not None:
+        state["pending_requests"] = recorder.pending_requests()
+    state["longtasks"] = await _long_tasks(page)
     try:
         shot = pathlib.Path(tempfile.gettempdir()) / "inmail-no-button.png"
+        started = time.monotonic()
         await page.screenshot(path=str(shot), full_page=False)
+        state["screenshot_ms"] = round((time.monotonic() - started) * 1000)
         state["screenshot"] = str(shot)
     except Exception:
         pass
+    try:
+        state["after_screenshot"] = await asyncio.wait_for(
+            page.evaluate(_AFTER_SCREENSHOT), _STATE_TIMEOUT
+        )
+    except Exception as e:
+        state["after_screenshot"] = {"error": repr(e)[:200]}
     logger.warning("Lead page without a message button: %s", state)
     return state
+
+
+async def _long_tasks(page: Any) -> Any:
+    try:
+        return await asyncio.wait_for(
+            page.evaluate(page_health.LONG_TASKS), _STATE_TIMEOUT
+        )
+    except Exception as e:
+        return {"error": repr(e)[:200]}
+
+
+def _half_rendered(state: dict[str, Any]) -> bool:
+    """The app got past its splash: the person's title or some body text.
+
+    Measured on account 2: such a page, reloaded, went back to the splash for
+    another full wait, while waiting on it is what can still bring the button.
+    """
+    for shown in (state, state.get("after_screenshot") or {}):
+        if (shown.get("body_chars") or 0) > 0:
+            return True
+        title = (shown.get("title") or "").strip()
+        if title and title != _SPLASH_TITLE:
+            return True
+    return False
 
 
 async def _describe_controls(page: Any) -> list[dict[str, Any]]:
@@ -346,21 +420,28 @@ async def send_inmail(
     pending: dict[str, Any] = {"open": False, "subject": False, "names": []}
     try:
         opener = page.locator(OPEN_COMPOSER).first
-        # Measured on account 2: a lead page loaded seconds after another
-        # composer call sometimes renders without its message button, and the
-        # next load is fine. Nothing is typed yet, so one more load is safe.
+        # Measured on account 2: a lead page sometimes never shows its message
+        # button within the wait. One that got past the splash gets a second
+        # wait on the same page; one still on the splash is loaded once more.
+        # Nothing is typed yet, so either is safe.
         loop = asyncio.get_running_loop()
         load_seconds = 0.0
-        attempts = 0
+        attempts = 1
+        path = "first"
+        failures.step("load_lead_page")
+        started = loop.time()
+        await page.goto(
+            lead_url, wait_until="domcontentloaded", timeout=_GOTO_TIMEOUT_MS
+        )
         for attempt in range(2):
-            attempts = attempt + 1
-            failures.step("load_lead_page")
-            started = loop.time()
-            await page.goto(lead_url, wait_until="domcontentloaded")
             failures.step("find_message_button")
+            cpu_before, waited_from = page_health.renderer_cpu(), loop.time()
             try:
                 await opener.wait_for(state="visible", timeout=_OPENER_TIMEOUT_MS)
                 load_seconds = round(loop.time() - started, 1)
+                renderer_cpu = page_health.cpu_since(
+                    cpu_before, loop.time() - waited_from
+                )
                 break
             except Exception as e:
                 _raise_if_throttled()
@@ -370,20 +451,55 @@ async def send_inmail(
                     for r in recorder.records
                     if r["status"] >= 400
                 ]
-                state = await _describe_lead_page(page)
-                if attempt == 0:
+                renderer_cpu = page_health.cpu_since(
+                    cpu_before, loop.time() - waited_from
+                )
+                state = await _describe_lead_page(page, recorder)
+                state["renderer_cpu"] = renderer_cpu
+                if attempt == 1:
+                    raise SendRefused(
+                        "This lead page has no Sales Navigator message button, "
+                        f"twice ({path}; page ended at {page.url}); nothing was "
+                        f"typed or sent. Sales API errors: {refused}. "
+                        f"Page state: {state}"
+                    ) from e
+                if _half_rendered(state):
+                    path = "waited_more"
                     logger.warning(
-                        "No message button on %s (sales-api errors %s); reloading",
+                        "No message button yet on %s, page past its splash "
+                        "(sales-api errors %s); waiting on it once more",
                         lead_url,
                         refused,
                     )
-                    await _human_pause(5.0, 9.0)
                     continue
-                raise SendRefused(
-                    "This lead page has no Sales Navigator message button, "
-                    f"twice (page ended at {page.url}); nothing was typed or "
-                    f"sent. Sales API errors: {refused}. Page state: {state}"
-                ) from e
+                stuck = "error" in state and "error" in (
+                    state.get("after_screenshot") or {}
+                )
+                path = "new_page" if stuck else "reloaded"
+                logger.warning(
+                    "No message button on %s, %s (sales-api errors %s); %s",
+                    lead_url,
+                    "page not answering" if stuck else "still on the splash",
+                    refused,
+                    "loading it in a new page" if stuck else "reloading",
+                )
+                await _human_pause(5.0, 9.0)
+                failures.step("load_lead_page")
+                if stuck:
+                    # A stuck renderer will not let go of its document, so a
+                    # navigation from it times out (measured on account 2).
+                    recorder.remove()
+                    page = await page_health.replace_page(page)
+                    failures.use_page(page)
+                    recorder = SalesApiRecorder(page)
+                    recorder.install()
+                    opener = page.locator(OPEN_COMPOSER).first
+                attempts = 2
+                started = loop.time()
+                await page.goto(
+                    lead_url, wait_until="domcontentloaded", timeout=_GOTO_TIMEOUT_MS
+                )
+        long_tasks = await _long_tasks(page)
         await _human_pause()
         failures.step("open_composer")
         await opener.click()
@@ -434,6 +550,14 @@ async def send_inmail(
             # From goto to a visible message button, on the load that showed it.
             "lead_load_seconds": load_seconds,
             "lead_load_attempts": attempts,
+            # first: shown within one wait; waited_more: a second wait on the
+            # same page; reloaded: the page was loaded again; new_page: it
+            # stopped answering and was loaded in a fresh page instead.
+            "lead_load_path": path,
+            # During the wait that showed the button: CPU of the renderer
+            # processes, and the page's longest tasks since it loaded.
+            "lead_load_renderer_cpu": renderer_cpu,
+            "lead_load_longtasks": long_tasks,
         }
 
         if not confirm_send:

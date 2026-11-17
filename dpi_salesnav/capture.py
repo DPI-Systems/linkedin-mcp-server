@@ -7,6 +7,7 @@ the page load already asked for, never issue our own API requests.
 import asyncio
 import json
 import logging
+import time
 from typing import Any
 from urllib.parse import urlparse
 
@@ -38,17 +39,53 @@ class SalesApiRecorder:
         self.seen: list[str] = []
         # Set when LinkedIn starts a human-verification check on this page.
         self.challenge: str | None = None
+        # Requests the context started and has not finished, for a load that
+        # stays on the splash: what it is still waiting for.
+        self._inflight: dict[int, tuple[str, str, float]] = {}
 
     # On the browser context, not the page: Sales Navigator can fetch its data
     # through a service worker, and those responses are only reported there.
     def install(self) -> None:
-        self._page.context.on("response", self._handle_response)
+        context = self._page.context
+        context.on("response", self._handle_response)
+        context.on("request", self._request_started)
+        context.on("requestfinished", self._request_ended)
+        context.on("requestfailed", self._request_ended)
 
     def remove(self) -> None:
-        try:
-            self._page.context.remove_listener("response", self._handle_response)
-        except Exception:
-            logger.debug("Failed to remove sales-api listener", exc_info=True)
+        context = self._page.context
+        for event, handler in (
+            ("response", self._handle_response),
+            ("request", self._request_started),
+            ("requestfinished", self._request_ended),
+            ("requestfailed", self._request_ended),
+        ):
+            try:
+                context.remove_listener(event, handler)
+            except Exception:
+                logger.debug("Failed to remove %s listener", event, exc_info=True)
+
+    def _request_started(self, request: Any) -> None:
+        if len(self._inflight) >= 400:
+            return
+        parsed = urlparse(request.url)
+        self._inflight[id(request)] = (
+            f"{parsed.netloc}{parsed.path[:100]}",
+            getattr(request, "resource_type", ""),
+            time.monotonic(),
+        )
+
+    def _request_ended(self, request: Any) -> None:
+        self._inflight.pop(id(request), None)
+
+    def pending_requests(self, limit: int = 15) -> list[dict[str, Any]]:
+        """The oldest requests still open, host and path only."""
+        now = time.monotonic()
+        oldest = sorted(self._inflight.values(), key=lambda r: r[2])[:limit]
+        return [
+            {"url": url, "type": kind, "age_s": round(now - started, 1)}
+            for url, kind, started in oldest
+        ]
 
     def _handle_response(self, response: Any) -> None:
         parsed = urlparse(response.url)

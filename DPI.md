@@ -57,6 +57,17 @@ owner se crea con el entrypoint de upstream y no tendrá las herramientas de Sal
     cualquier atributo), que no se traduce. Dos ficheros con el mismo nombre se rechazan.
   - `lead_load_seconds` son los segundos desde abrir la ficha del lead hasta ver su botón de mensaje (se espera hasta
     60 s), y `lead_load_attempts` vale 2 si hizo falta recargarla.
+  - `lead_load_path` dice qué camino se tomó: `first` (el botón salió en la primera espera), `waited_more` (la ficha
+    ya había pasado del splash, con el nombre en el título o texto en la página, y se esperaron otros 60 s sin
+    recargar) o `reloaded` (seguía en el splash vacío y se recargó). Si tampoco sale, el error incluye la
+    visibilidad y el foco de la pestaña, los fotogramas por segundo, las peticiones aún abiertas y el estado leído
+    otra vez justo después de la captura.
+  - Si la ficha deja de responder (no se puede leer su estado ni después de la captura), se abre en una página nueva y
+    se cierra la colgada: `lead_load_path` vale `new_page`. Navegar desde ella fallaba con un timeout. Las dos cargas
+    de la ficha esperan hasta 45 s.
+  - `lead_load_renderer_cpu` es el CPU de los procesos renderer de Chromium durante la espera que mostró el botón
+    (leído de `/proc`, solo en Linux), y `lead_load_longtasks` las tareas largas de la página, sus animation frames
+    más largos con el script responsable y sus cambios de visibilidad. Los mismos datos van en el estado de un fallo.
   - `status: "unconfirmed"` significa que se pulsó enviar pero no hubo confirmación: revisa el buzón antes de reintentar.
 - **Fallos de las herramientas de navegador** (todas las de arriba): cada fallo guarda, sin activar nada, una captura
   de la parte visible y de la página entera, el HTML, la URL, la excepción con su traza, los argumentos y el paso en
