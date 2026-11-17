@@ -113,3 +113,19 @@ def test_validate_thread_id_rejects_garbage(bad):
 
 def test_validate_thread_id_accepts_encoded():
     assert validate_thread_id("2-YWJj%3D%3D") == "2-YWJj=="
+
+
+def test_pages_merge_newest_first_and_each_thread_once():
+    from dpi_salesnav.inbox import merge_thread_pages
+
+    def page(*ids):
+        return {
+            **PAYLOAD,
+            "data": {"elements": [{**_thread(), "id": i} for i in ids]},
+        }
+
+    threads = merge_thread_pages([page("2-a", "2-b"), page("2-b", "2-c")], ME, 10)
+    assert [t["thread_id"] for t in threads] == ["2-a", "2-b", "2-c"]
+    assert all("messages" not in t for t in threads)
+    assert threads[0]["contact"]["full_name"] == "Ana Ejemplo"
+    assert [t["thread_id"] for t in merge_thread_pages([page("2-a", "2-b")], ME, 1)] == ["2-a"]
