@@ -325,17 +325,20 @@ def register_salesnav_tools(
     @with_failure_artifacts
     async def salesnav_inbox(
         ctx: Context,
-        limit: Annotated[int, Field(ge=1, le=20)] = 20,
+        limit: Annotated[int, Field(ge=1, le=1000)] = 20,
     ) -> dict[str, Any]:
         """
-        List the newest Sales Navigator inbox threads (up to 20).
+        List Sales Navigator inbox threads, newest first.
 
-        Opening the inbox also opens its newest thread, which Sales Navigator
-        then marks as read.
+        The first page holds about 20; for more, the inbox list is scrolled
+        (as a person would) until `limit` threads or its end. reached_end
+        says the oldest thread was reached. Opening the inbox also opens its
+        newest thread, which Sales Navigator then marks as read.
 
         Args:
             ctx: FastMCP context for progress reporting
-            limit: How many threads to return (1-20).
+            limit: How many threads to return (1-1000). Over ~20 it pages,
+                at about 3 s a page.
 
         Returns:
             Dict with threads. Each thread has thread_id, contact (full_name,

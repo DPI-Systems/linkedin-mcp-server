@@ -149,27 +149,134 @@ def _is_thread_list(record: dict[str, Any]) -> bool:
     return urlparse(record["url"]).path == THREADS_PATH and record["method"] == "GET"
 
 
-async def read_inbox(page: Any, *, limit: int = 20) -> dict[str, Any]:
-    payload, records = await _load(page, INBOX_URL, _is_thread_list)
-    _raise_if_throttled()
-    if payload is None:
-        raise RuntimeError(
-            f"Sales Navigator inbox loaded no thread data; page ended at {page.url}"
-        )
-    me = viewer_profile_id(records)
-    people = _people(payload)
-    threads = [
-        thread_from_payload(t, people, me)
-        for t in (payload.get("data") or {}).get("elements") or []
-        if isinstance(t, dict)
+# Older threads load as the thread list is scrolled, so the inbox is paged by
+# scrolling it, like a person, and keeping every page Sales Navigator fetches.
+# Every scrollable box goes to its bottom: the list is one of them, and the open
+# thread already sits at its bottom (its older messages load scrolling *up*).
+_SCROLL_JS = """() => {
+  let n = 0;
+  for (const el of document.querySelectorAll('*')) {
+    const oy = getComputedStyle(el).overflowY;
+    if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight + 4) {
+      el.scrollTop = el.scrollHeight;
+      el.dispatchEvent(new Event('scroll', {bubbles: true}));
+      n++;
+    }
+  }
+  window.scrollTo(0, document.body.scrollHeight);
+  return n;
+}"""
+_PAGE_WAIT = 8.0  # seconds for an older page to arrive after a scroll
+_SCROLL_PAUSE = 1.5  # between scrolls, so paging stays at a person's pace
+_MAX_EMPTY_SCROLLS = 2  # scrolls with no new thread before calling it the end
+_MAX_PAGES = 100
+
+
+def merge_thread_pages(
+    payloads: list[dict[str, Any]], me: str | None, limit: int
+) -> list[dict[str, Any]]:
+    """Threads of every list page, newest first, each once (pages overlap)."""
+    people: dict[str, dict[str, Any]] = {}
+    for payload in payloads:
+        people.update(_people(payload))
+    seen: set[str] = set()
+    threads = []
+    for payload in payloads:
+        for t in (payload.get("data") or {}).get("elements") or []:
+            if not isinstance(t, dict) or t.get("id") in seen:
+                continue
+            seen.add(t.get("id"))
+            thread = thread_from_payload(t, people, me)
+            # The list carries only the newest message of each thread.
+            thread.pop("messages")
+            threads.append(thread)
+    return threads[:limit]
+
+
+def _list_payloads(recorder: SalesApiRecorder) -> list[dict[str, Any]]:
+    return [
+        r["json"]
+        for r in recorder.records
+        if _is_thread_list(r) and isinstance(r["json"], dict)
     ]
-    for t in threads:
-        # The list carries only the newest message of each thread.
-        t.pop("messages")
+
+
+def _thread_ids(payloads: list[dict[str, Any]]) -> set[str]:
+    return {
+        t.get("id")
+        for p in payloads
+        for t in (p.get("data") or {}).get("elements") or []
+        if isinstance(t, dict)
+    }
+
+
+async def read_inbox(page: Any, *, limit: int = 20) -> dict[str, Any]:
+    recorder = SalesApiRecorder(page)
+    recorder.install()
+    reached_end = False
+    stopped = None
+    try:
+        await page.goto(INBOX_URL, wait_until="domcontentloaded")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _RESPONSE_TIMEOUT
+        while loop.time() < deadline:
+            await recorder.drain()
+            if _list_payloads(recorder):
+                break
+            _raise_if_throttled()
+            await asyncio.sleep(0.5)
+        else:
+            _raise_if_challenged(recorder)
+            raise RuntimeError(
+                f"Sales Navigator inbox loaded no thread data; page ended at {page.url}"
+            )
+        if viewer_profile_id(recorder.records) is None:
+            await asyncio.sleep(1.5)
+            await recorder.drain()
+
+        empty_scrolls = 0
+        while len(_thread_ids(_list_payloads(recorder))) < limit:
+            if len(_list_payloads(recorder)) >= _MAX_PAGES:
+                break
+            known = len(_thread_ids(_list_payloads(recorder)))
+            await asyncio.sleep(_SCROLL_PAUSE)
+            await page.evaluate(_SCROLL_JS)
+            deadline = loop.time() + _PAGE_WAIT
+            grew = False
+            while loop.time() < deadline:
+                await recorder.drain()
+                _raise_if_throttled()
+                if len(_thread_ids(_list_payloads(recorder))) > known:
+                    grew = True
+                    break
+                await asyncio.sleep(0.5)
+            if grew:
+                empty_scrolls = 0
+                continue
+            if recorder.challenge:
+                # A check while paging: keep what was read, page no further.
+                stopped = f"LinkedIn ran a check ({recorder.challenge})"
+                break
+            empty_scrolls += 1
+            if empty_scrolls >= _MAX_EMPTY_SCROLLS:
+                reached_end = True
+                break
+    finally:
+        recorder.remove()
+        await recorder.drain()
+
+    payloads = _list_payloads(recorder)
+    me = viewer_profile_id(recorder.records)
+    threads = merge_thread_pages(payloads, me, limit)
     return {
         "viewer_identified": me is not None,
-        "count": min(len(threads), limit),
-        "threads": threads[:limit],
+        "count": len(threads),
+        "pages_loaded": len(payloads),
+        # True when scrolling brought no older thread: the list ends here.
+        "reached_end": reached_end,
+        # Why paging stopped before the end, if it did.
+        "stopped": stopped,
+        "threads": threads,
     }
 
 
