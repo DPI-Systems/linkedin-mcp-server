@@ -239,6 +239,7 @@ async def read_inbox(page: Any, *, limit: int = 20) -> dict[str, Any]:
             if len(_list_payloads(recorder)) >= _MAX_PAGES:
                 break
             known = len(_thread_ids(_list_payloads(recorder)))
+            check_before = recorder.challenge
             await asyncio.sleep(_SCROLL_PAUSE)
             await page.evaluate(_SCROLL_JS)
             deadline = loop.time() + _PAGE_WAIT
@@ -253,8 +254,9 @@ async def read_inbox(page: Any, *, limit: int = 20) -> dict[str, Any]:
             if grew:
                 empty_scrolls = 0
                 continue
-            if recorder.challenge:
-                # A check while paging: keep what was read, page no further.
+            if recorder.challenge and recorder.challenge != check_before:
+                # A check began with this scroll and no page came: keep what
+                # was read and page no further.
                 stopped = f"LinkedIn ran a check ({recorder.challenge})"
                 break
             empty_scrolls += 1
@@ -276,6 +278,9 @@ async def read_inbox(page: Any, *, limit: int = 20) -> dict[str, Any]:
         "reached_end": reached_end,
         # Why paging stopped before the end, if it did.
         "stopped": stopped,
+        # A check LinkedIn ran during the load. It also fires on its own,
+        # with pages still coming, so on its own it does not mean a stop.
+        "check_seen": recorder.challenge,
         "threads": threads,
     }
 
